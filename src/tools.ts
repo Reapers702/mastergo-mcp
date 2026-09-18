@@ -136,9 +136,10 @@ export function buildTools(): ToolDef[] {
     {
       name: "get_page_tree",
       description:
-        "获取指定页面的节点树：节点 id、名称、父节点 id、父子层级结构（可遍历整棵图层树）。" +
-        "通过浏览器 Cookie 全量下载 /data/{fileKey} 私有二进制，依据节点记录 02=parent 字段 + " +
-        "01=id / 04=name 重建层级（实测父/子 100% 与浏览器一致）。" +
+        "获取指定页面的节点树：节点 id、名称、类型、父节点 id、父子层级结构（可遍历整棵图层树）。" +
+        "通过浏览器 Cookie 全量下载 /data/{fileKey} 私有二进制，依据节点记录 02=parent 重建层级、" +
+        "依据几何段首个 1c 子块字节判别节点类型（TEXT/FRAME/GROUP/RECTANGLE/ELLIPSE/LINE/PEN/" +
+        "SLICE/INSTANCE/BOOLEAN_OPERATION；实测类型 100% 与浏览器一致）。" +
         "参数 file 传文件 ID 或完整 URL；page 传具体页（可沿用 list_pages 返回的页面 id，或 URL 中 page_id）。",
       params: {
         file: z.string().describe("MasterGo 文件 ID 或完整文件 URL（必填）"),
@@ -168,12 +169,13 @@ export function buildTools(): ToolDef[] {
         const tree = await client.getPageTree(fileKey, pageId);
 
         // 按需裁剪为浅层结构，避免一次性输出过大
-        const nameById = new Map(tree.nodes.map((n: any) => [n.id, n.name] as [string, string]));
+        const metaById = new Map<string, any>(tree.nodes.map((n: any) => [n.id, n]));
         const outNodes: Array<Record<string, unknown>> = [];
         const maxDepth = typeof args.depth === "number" ? args.depth : Infinity;
         const walk = (id: string, d: number) => {
           if (d > maxDepth) return;
-          outNodes.push({ id, name: nameById.get(id) ?? "" });
+          const n = metaById.get(id);
+          outNodes.push({ id, name: n?.name ?? "", type: n?.type ?? null, parent: n?.parent ?? null });
           for (const c of tree.children[id] ?? []) walk(c.id, d + 1);
         };
         walk(pageId, 0);

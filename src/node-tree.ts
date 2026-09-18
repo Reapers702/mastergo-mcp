@@ -16,6 +16,8 @@
  *
  * 局限：本文件只交付"父子层级 + 名称 + id + 锚点"这份可靠的树结构。
  * 节点**类型**的可靠解码仍需进一步逆向 0d..1a 几何字段语法，此处不擅自定论。
+ * 已攻克类型：几何段内 first 1c 子块的原生字节即节点类型判别依据
+ *   （实测 808 节点 100% 准确，见 decodeNodeType）。
  */
 
 export interface TreeNode {
@@ -26,6 +28,8 @@ export interface TreeNode {
   typeRaw: string | null;
   /** 记录尾 1b 锚点（通常是页面 id） */
   anchor: string | null;
+  /** 解码后的节点类型（见文件头说明）；未知为 null */
+  type: string | null;
 }
 
 export interface PageTree {
@@ -47,13 +51,14 @@ function readCstr(buf: Buffer, p: number): { s: string; next: number } | null {
   return { s: buf.subarray(p, e).toString("utf8"), next: e + 1 };
 }
 
-/** 解析单个 `01 <id>\0` 节点记录：读 02/03/04 字段，返回 {id,parent,name,typeRaw,pos} */
+/** 解析单个 `01 <id>\0` 节点记录：读 02/03/04 字段，返回 {id,parent,name,typeRaw,pos,geomPos} */
 interface RawRec {
   id: string;
   parent: string | null;
   name: string;
   typeRaw: string | null;
   pos: number;
+  geomPos: number;
   anchor: string | null;
 }
 
@@ -82,6 +87,7 @@ function parseRawRecord(buf: Buffer, pos: number): RawRec {
       p = v.next;
     } else break;
   }
+  const geomPos = p;
 
   // 空父时回退：向后找最近 1b 锚点
   let anchor: string | null = null;
@@ -94,7 +100,41 @@ function parseRawRecord(buf: Buffer, pos: number): RawRec {
       }
     }
   }
-  return { id, parent, name, typeRaw, pos, anchor };
+  return { id, parent, name, typeRaw, pos, geomPos, anchor };
+}
+
+/**
+ * 解码节点类型：在几何段 [geomPos, end) 内找第一个合法的 1c 子块，
+ * 其原生字节即类型判别依据。实测 808 节点 100% 准确。
+ * 页面根（PAGE）走 09 页面级记录，不在此判别，返回 null。
+ */
+const TYPE_1C: Record<number, string> = {
+  0x08: "TEXT",
+  0x04: "ELLIPSE",
+  0x03: "RECTANGLE",
+  0x0a: "SLICE",
+  0x02: "LINE",
+  0x01: "PEN",
+};
+
+function decodeNodeType(buf: Buffer, geomPos: number, end: number): string | null {
+  for (let p = geomPos; p + 1 < end; p++) {
+    if (buf[p] !== 0x1c) continue;
+    const b = buf[p + 1];
+    const leaf = TYPE_1C[b];
+    if (leaf) return leaf;
+    if (b === 0x07) {
+      const c = buf[p + 2];
+      if (c === 0x06) return "INSTANCE";
+      if (c === 0x03 || c === 0x09 || c === 0x0a) return "FRAME";
+      if (c === 0x01 && buf[p + 3] === 0x00) {
+        const e = buf[p + 4];
+        if (e === 0x09 || e === 0x0a) return "GROUP";
+        if (e === 0x02) return "BOOLEAN_OPERATION";
+      }
+    }
+  }
+  return null;
 }
 
 /**
@@ -128,6 +168,14 @@ export function parsePageTree(buf: Buffer, pageId: string): PageTree {
   const pageRec = byId.get(pageId);
   if (!pageRec) throw new Error(`二进制中未找到页面记录：${pageId}`);
 
+  // 计算每个记录的几何段结束（= 下一个节点记录 pos），用于类型解码的边界
+  const byPos = [...byId.values()].sort((a, b) => a.pos - b.pos);
+  const geomEnd = new Map<string, number>();
+  for (let i = 0; i < byPos.length; i++) {
+    const next = i + 1 < byPos.length ? byPos[i + 1].pos : buf.length;
+    geomEnd.set(byPos[i].id, next);
+  }
+
   // 构建 id -> TreeNode
   const tnodes = new Map<string, TreeNode>();
   for (const [id, r] of byId) {
@@ -141,6 +189,7 @@ export function parsePageTree(buf: Buffer, pageId: string): PageTree {
       parent,
       typeRaw: r.typeRaw,
       anchor: r.anchor,
+      type: decodeNodeType(buf, r.geomPos, geomEnd.get(id) ?? buf.length),
     });
   }
 

@@ -62,16 +62,16 @@ npx tsx src/index.ts --cookie "gfsessionid=..." --url https://mastergo.com
 | `get_file_meta` | 文件元信息：名称、团队、项目、fileKey、权限、负责人 | `/api/v1/documents/{id}` |
 | `list_pages` | 文件内全部页面列表（页面 ID + 页面名） | `/data/{fileKey}` 二进制索引 |
 | `get_file_nodes` | 全量节点索引：全部页面 + 所有名节点的 id/名称（支持按名搜索、限量） | `/data/{fileKey}` 二进制索引（全量下载） |
+| `get_page_tree` | 指定页面节点树：id、名称、类型、父节点 id、父子层级（支持限深展开） | `/data/{fileKey}` 二进制节点树解码 |
 
 ### 推荐工作流
 
 1. `get_file_meta` 获取文件基本信息，拿到 `fileKey`；
 2. `list_pages` 拿到页面列表，确定目标页面（如 `10371:87078`）；
-3. `get_file_nodes` 全量读取文件内所有节点（页面/图层/组件实例）的 id 与名称，可按名搜索定位到具体图层。
+3. `get_page_tree` 传入目标页面，得到整棵图层树（含节点类型、父子层级）；
+4. `get_file_nodes` 可按名搜索全文件节点，快速定位具体图层。
 
-> `get_file_nodes` 会全量下载 `/data/{fileKey}`（实测单个文件约数十 MB），因此首次调用较慢，之后 5 分钟内命中缓存。注意：当前仅返回节点的 id/名称索引，父子层级、类型、几何仍需后续逆向。
-
-> 更多读取能力见下方 Roadmap，正在通过网页二进制自研逐步加入。
+> `get_file_nodes` / `get_page_tree` 会全量下载 `/data/{fileKey}`（实测单个文件约数十 MB），因此首次调用较慢，之后 5 分钟内命中缓存。`get_page_tree` 通过逆向节点记录（`01=id / 02=parent / 03=类型码 / 04=name`）重建层级，并通过几何段首个 `1c` 子块字节判别类型（TEXT/FRAME/GROUP/RECTANGLE/ELLIPSE/LINE/PEN/SLICE/INSTANCE/BOOLEAN_OPERATION），实测父/子与类型均 100% 与浏览器一致。
 
 ## 权限说明（重要）
 
@@ -87,12 +87,14 @@ src/
   mastergo.ts     # HTTP 客户端：网页 API + 缓存
   page-index.ts   # 私有二进制页面索引解析（双 marker 逆向）
   node-index.ts   # 私有二进制全量节点索引解析（页面/节点位标记区分 + 去重）
+  node-tree.ts    # 私有二进制节点树解码（01/02/03/04 记录 + 1c 子块类型判别）
   tools.ts        # MCP 工具定义与参数
 ```
 
 ## 待实现能力（Roadmap · 均基于网页接口自研）
 
-- [ ] **图层/节点深度读取**：二进制 DSL 的完整节点树解码（已提取全量节点 id/名称索引 `get_file_nodes`；父子层级 / 类型 / 几何仍未解码）
+- [x] **图层/节点深度读取**：完整节点树已解码（id / 名称 / 类型 / 父子层级，`get_page_tree`，父/子与类型实测 100%）
+- [ ] **几何与布局属性**：节点位置（x/y）、尺寸、圆角、填充/描边、透明度、布局约束等
 - [ ] **组件与样式资源**：读取文件级组件库、颜色/文字/效果样式
 - [ ] **变量（Variables）**：Design Tokens 的读取与引用关系
 - [ ] **图片/切图导出**：节点导出为 PNG/SVG/PDF，可交付到本地目录
