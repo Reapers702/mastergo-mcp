@@ -188,6 +188,16 @@ export class MasterGoClient {
     return { pages: parsed.pages, nodes: parsed.nodes };
   }
 
+  /**
+   * 指定页面的节点树（父子层级 + 名称 + id）。
+   * 全量下载 /data/{fileKey} 后，依据节点记录 02=parent 字段重建以 pageId 为根的树。
+   */
+  async getPageTree(fileKey: string, pageId: string): Promise<any> {
+    const { parsePageTree } = await import("./node-tree.js");
+    const buf = await this.fetchData(fileKey);
+    return parsePageTree(buf, pageId);
+  }
+
   // ---- /mcp/* 网关接口已完全移除（不依赖官方 MCP，走纯网页 API 自研） ----
 }
 

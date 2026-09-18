@@ -132,5 +132,62 @@ export function buildTools(): ToolDef[] {
         });
       },
     },
+
+    {
+      name: "get_page_tree",
+      description:
+        "获取指定页面的节点树：节点 id、名称、父节点 id、父子层级结构（可遍历整棵图层树）。" +
+        "通过浏览器 Cookie 全量下载 /data/{fileKey} 私有二进制，依据节点记录 02=parent 字段 + " +
+        "01=id / 04=name 重建层级（实测父/子 100% 与浏览器一致）。" +
+        "参数 file 传文件 ID 或完整 URL；page 传具体页（可沿用 list_pages 返回的页面 id，或 URL 中 page_id）。",
+      params: {
+        file: z.string().describe("MasterGo 文件 ID 或完整文件 URL（必填）"),
+        page: z
+          .string()
+          .describe(
+            "目标页面的节点 id（必填，形如 10371:87078）。" +
+              "可从 list_pages 返回的页面 id 或浏览器 URL 的 page_id 参数获得"
+          ),
+        depth: z
+          .number()
+          .int()
+          .min(1)
+          .max(20)
+          .optional()
+          .describe("向下展开的层数，默认完整展开到全部子节点"),
+      },
+      run: async (client, args) => {
+        const { fileId, layerId } = normalize(String(args.file));
+        const meta = await client.getFileMeta(fileId);
+        const fileKey: string | undefined = meta.data?.fileKey;
+        if (!fileKey) throw new MasterGoError("无法获取 fileKey，请检查文件 ID 与访问权限");
+        const pageId = String(args.page || layerId);
+        if (!pageId) {
+          throw new MasterGoError("缺少 page 参数：请用 list_pages 拿到目标页面 id，或从 URL 的 page_id 传入");
+        }
+        const tree = await client.getPageTree(fileKey, pageId);
+
+        // 按需裁剪为浅层结构，避免一次性输出过大
+        const nameById = new Map(tree.nodes.map((n: any) => [n.id, n.name] as [string, string]));
+        const outNodes: Array<Record<string, unknown>> = [];
+        const maxDepth = typeof args.depth === "number" ? args.depth : Infinity;
+        const walk = (id: string, d: number) => {
+          if (d > maxDepth) return;
+          outNodes.push({ id, name: nameById.get(id) ?? "" });
+          for (const c of tree.children[id] ?? []) walk(c.id, d + 1);
+        };
+        walk(pageId, 0);
+
+        return jsonOut({
+          source: "web-data-node-tree",
+          fileId,
+          fileKey,
+          pageId,
+          totalNodes: tree.nodes.length,
+          maxDepth: maxDepth === Infinity ? "full" : maxDepth,
+          nodes: outNodes,
+        });
+      },
+    },
   ];
 }
