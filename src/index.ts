@@ -1,10 +1,9 @@
 /**
- * mastergo-mcp — 基于 MasterGo 网页 API 的内部 MCP Server。
+ * mastergo-mcp — 基于 MasterGo **网页接口**自研的内部 MCP Server（不依赖官方 MCP 网关 /mcp/*）。
  *
  * 用法：
- *   MG_MCP_TOKEN=mg_xxx npx tsx src/index.ts      # 个人访问令牌（/mcp/* 网关）
- *   MG_COOKIE="gfsessionid=..." npx tsx src/index.ts  # 浏览器 Cookie（网页 API）
- *   npx tsx src/index.ts --token mg_xxx --cookie "..." --url https://mastergo.com
+ *   MG_COOKIE="gfsessionid=..." npx tsx src/index.ts   # 浏览器 Cookie（网页 API）
+ *   npx tsx src/index.ts --cookie "gfsessionid=..." --url https://mastergo.com
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";

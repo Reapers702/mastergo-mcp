@@ -1,55 +1,14 @@
 /**
  * MasterGo HTTP 客户端。
  *
- * 数据源分两类：
- *   A. 网页 API（/api/v1/...、/data/...）：浏览器会话使用，Cookie 认证即可，部分接口也支持令牌；
- *   B. /mcp/* 网关接口（/mcp/meta、/mcp/dsl、/mcp/design-sections、/mcp/page-layers）：
- *      官方 Magic MCP 同款，返回结构化 JSON DSL，必须携带 X-MG-UserAccessToken。
- *
- * 认证优先级：个人访问令牌 > Cookie。
+ * 完全基于 MasterGo 网页接口（/api/v1/...、/data/...）自研实现，
+ * 不依赖官方 MCP 网关（/mcp/*，需付费席位）。浏览器登录态（Cookie）即可访问。
  */
 
 import axios, { AxiosError } from "axios";
 import type { Config } from "./config.js";
 
 const DEFAULT_TIMEOUT = 120_000;
-
-// ---- 响应类型（宽松，字段以服务端为准） ----
-export interface DslResponse {
-  [key: string]: any;
-}
-
-export interface DesignSectionsResponse {
-  sections?: any[];
-  totalSections?: number;
-  rootMetadata?: { allTexts?: string[]; width?: number; height?: number; [k: string]: any };
-  rootContainer?: { minHeight?: string; width?: string; [k: string]: any };
-  splitContainers?: any[];
-  allTexts?: string[];
-  dsl?: any;
-  nodeCount?: number;
-  [k: string]: any;
-}
-
-export interface PageLayersResponse {
-  fileId: string;
-  pageLayerId: string;
-  pageName?: string;
-  totalLayers: number;
-  layers: Array<{
-    id: string;
-    name: string;
-    type: string;
-    depth: number;
-    parentId?: string;
-    childrenCount: number;
-    width?: number;
-    height?: number;
-  }>;
-  partial?: boolean;
-  message?: string;
-  [k: string]: any;
-}
 
 export class MasterGoError extends Error {
   code?: string;
@@ -76,13 +35,9 @@ function toMasterGoError(err: unknown): MasterGoError {
       code: String(body?.code ?? ""),
       status: err.response?.status,
     });
-    if (e.code === "10016") {
-      e.message = "需要 MasterGo 个人访问令牌：请配置 MG_MCP_TOKEN（或 --token），" +
-        "或在请求头 x-mg-useraccesstoken 传入有效令牌。当前请求未携带令牌。";
-    }
     if (e.code === "10003") {
       e.message = "MasterGo 权限不足（10003）：请确认账号对目标文件有访问权限，" +
-        "且已开通 API 所需席位（团队版/研发席位）。";
+        "且已开通对应的团队/研发席位。";
     }
     return e;
   }
@@ -147,19 +102,6 @@ export class MasterGoClient {
     return h;
   }
 
-  hasToken(): boolean {
-    return Boolean(this.cfg.token);
-  }
-
-  private assertToken(method: string): void {
-    if (!this.hasToken()) {
-      throw new MasterGoError(
-        `接口 ${method} 需要 MasterGo 个人访问令牌：请在个人设置 → 安全设置 → 个人访问令牌 生成，` +
-          `并通过环境变量 MG_MCP_TOKEN 或参数 --token 传入。Cookie 仅能访问网页 API。`
-      );
-    }
-  }
-
   private async request<T>(config: {
     method: "GET" | "POST";
     path: string;
@@ -209,50 +151,7 @@ export class MasterGoClient {
     return parsePageBlocks(buf);
   }
 
-  // ---- /mcp/* 网关接口（需要令牌） ----
-
-  /** 节点 DSL：GET /mcp/dsl?fileId&layerId */
-  getDsl(fileId: string, layerId: string, sourceLayerId?: string): Promise<DslResponse> {
-    this.assertToken("mcp/dsl");
-    const params: Record<string, any> = { fileId, layerId };
-    if (sourceLayerId) params.sourceLayerId = sourceLayerId;
-    return withCache(`dsl:${fileId}:${layerId}`, () =>
-      this.request({ method: "GET", path: "/mcp/dsl", params })
-    );
-  }
-
-  /** 分区 DSL 列表/单片：GET /mcp/design-sections?fileId&layerId[&sectionIndex] */
-  getDesignSections(
-    fileId: string,
-    layerId: string,
-    sectionIndex?: number,
-    fromPageParam?: boolean
-  ): Promise<DesignSectionsResponse> {
-    this.assertToken("mcp/design-sections");
-    const params: Record<string, any> = { fileId, layerId };
-    if (sectionIndex !== undefined) params.sectionIndex = sectionIndex;
-    if (fromPageParam) params.fromPageParam = "true";
-    const key = `sections:${fileId}:${layerId}:${sectionIndex ?? "list"}`;
-    return withCache(key, () => this.request({ method: "GET", path: "/mcp/design-sections", params }));
-  }
-
-  /** 页面图层枚举：GET /mcp/page-layers?fileId&layerId */
-  getPageLayers(fileId: string, layerId: string): Promise<PageLayersResponse> {
-    this.assertToken("mcp/page-layers");
-    return withCache(`page-layers:${fileId}:${layerId}`, () =>
-      this.request({ method: "GET", path: "/mcp/page-layers", params: { fileId, layerId } })
-    );
-  }
-
-  /** 元数据：GET /mcp/meta?fileId&layerId */
-  getMeta(fileId: string, layerId: string, sourceLayerId?: string): Promise<any> {
-    this.assertToken("mcp/meta");
-    const params: Record<string, any> = { fileId, layerId };
-    if (sourceLayerId) params.sourceLayerId = sourceLayerId;
-    return withCache(`meta-mcp:${fileId}:${layerId}`, () =>
-      this.request({ method: "GET", path: "/mcp/meta", params })
-    );
-  }
+  // ---- /mcp/* 网关接口已完全移除（不依赖官方 MCP，走纯网页 API 自研） ----
 }
 
 /** 从 MasterGo URL / 短链解析 fileId、layerId */
