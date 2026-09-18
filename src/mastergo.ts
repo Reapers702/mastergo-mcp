@@ -131,24 +131,61 @@ export class MasterGoClient {
     );
   }
 
-  /**
-   * 文件页面索引：GET /data/{fileKey}?wv=v3.0.0（部分下载）。
-   * 返回 MasterGo 私有二进制 DSL，页面块集中在文件头部，
-   * 这里仅拉取前 PAGE_INDEX_BYTES 字节解析页面列表，避免下载全量（可能数十 MB）。
-   */
-  async getFilePageList(fileKey: string): Promise<Array<{ id: string; name: string }>> {
-    const { parsePageBlocks } = await import("./page-index.js");
+  // 全量 /data 二进制的专用缓存（可能数十 MB，只缓存少量条目避免内存膨胀）
+  private fullDataCache = new Map<string, { buf: Buffer; expiresAt: number }>();
+  private static readonly FULL_DATA_MAX = 2;
+  private static readonly FULL_DATA_TTL_MS = 5 * 60 * 1000;
+
+  /** 拉取 /data/{fileKey} 私有二进制字节。默认全量下载；传 maxBytes 时用 Range 只取前段。 */
+  private async fetchData(fileKey: string, maxBytes?: number): Promise<Buffer> {
     if (!this.cfg.cookie && !this.cfg.token) {
-      throw new MasterGoError("list_pages 的网页索引模式需要配置浏览器 Cookie（MG_COOKIE）");
+      throw new MasterGoError("读取 /data 网页二进制需要浏览器 Cookie（MG_COOKIE）");
     }
-    const maxBytes = 8 * 1024 * 1024; // 前 8MB 通常已覆盖全部页面块
+    const cacheKey = `full:${fileKey}`;
+    if (!maxBytes) {
+      const hit = this.fullDataCache.get(cacheKey);
+      if (hit && hit.expiresAt > Date.now()) return hit.buf;
+    }
+    const headers: Record<string, string> = { ...this.headers() };
+    if (maxBytes) headers["Range"] = `bytes=0-${maxBytes - 1}`;
     const res = await this.client.get(`${this.cfg.baseUrl}/data/${fileKey}`, {
-      params: { wv: "v3.0.0" },
-      headers: { ...this.headers(), Range: `bytes=0-${maxBytes - 1}` },
+      params: { wv: "v3.2.1" },
+      headers,
       responseType: "arraybuffer",
     });
     const buf = Buffer.from(res.data as ArrayBuffer);
+    if (!maxBytes) {
+      if (this.fullDataCache.size >= MasterGoClient.FULL_DATA_MAX) {
+        // 淘汰最旧的
+        const oldest = this.fullDataCache.keys().next().value;
+        if (oldest !== undefined) this.fullDataCache.delete(oldest);
+      }
+      this.fullDataCache.set(cacheKey, { buf, expiresAt: Date.now() + MasterGoClient.FULL_DATA_TTL_MS });
+    }
+    return buf;
+  }
+
+  /**
+   * 文件页面列表：GET /data/{fileKey}（部分下载，前 8MB 已覆盖文件头部的页面索引块）。
+   */
+  async getFilePageList(fileKey: string): Promise<Array<{ id: string; name: string }>> {
+    const { parsePageBlocks } = await import("./page-index.js");
+    const buf = await this.fetchData(fileKey, 8 * 1024 * 1024);
     return parsePageBlocks(buf);
+  }
+
+  /**
+   * 文件页面 + 全量节点索引：GET /data/{fileKey}（全量下载）。
+   * 说明：绝大多数图层/节点记录位于 8MB 之后，因此此处必须全量拉取（可能数十 MB）。
+   */
+  async getFileNodes(fileKey: string): Promise<{
+    pages: Array<{ id: string; name: string }>;
+    nodes: Array<{ id: string; name: string }>;
+  }> {
+    const { parseNodeBlocks } = await import("./node-index.js");
+    const buf = await this.fetchData(fileKey);
+    const parsed = parseNodeBlocks(buf);
+    return { pages: parsed.pages, nodes: parsed.nodes };
   }
 
   // ---- /mcp/* 网关接口已完全移除（不依赖官方 MCP，走纯网页 API 自研） ----

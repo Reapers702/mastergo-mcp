@@ -6,8 +6,8 @@
 
 ## 特性
 
-- **单 Cookie 认证**：浏览器 Cookie（`gfsessionid=...`）即可访问文件元信息与页面列表，无需个人访问令牌、无需付费席位
-- **私有二进制逆向**：解析 `/data/{fileKey}` 的 MasterGo 私有二进制格式，提取文件内全部页面列表（双 marker 逆向）
+- **单 Cookie 认证**：浏览器 Cookie（`gfsessionid=...`）即可访问文件元信息 / 页面列表 / 全量节点索引，无需个人访问令牌、无需付费席位
+- **私有二进制逆向**：解析 `/data/{fileKey}` 的 MasterGo 私有二进制格式，提取文件内全部页面列表（双 marker 逆向）与全量节点索引（页面/节点位标记区分 + 去重）
 - **5 分钟 LRU 缓存 + in-flight 去重**：相同请求并发复用，避免重复网络开销
 - **URL 智能解析**：直接粘贴设计稿 URL（含 `?page_id=` / `?layer_id=`）即可使用
 - **`.env` 配置**：开发/测试期可放在根目录 `.env`，正式生产改用环境变量，优先级一致
@@ -61,11 +61,15 @@ npx tsx src/index.ts --cookie "gfsessionid=..." --url https://mastergo.com
 | --- | --- | --- |
 | `get_file_meta` | 文件元信息：名称、团队、项目、fileKey、权限、负责人 | `/api/v1/documents/{id}` |
 | `list_pages` | 文件内全部页面列表（页面 ID + 页面名） | `/data/{fileKey}` 二进制索引 |
+| `get_file_nodes` | 全量节点索引：全部页面 + 所有名节点的 id/名称（支持按名搜索、限量） | `/data/{fileKey}` 二进制索引（全量下载） |
 
 ### 推荐工作流
 
 1. `get_file_meta` 获取文件基本信息，拿到 `fileKey`；
-2. `list_pages` 拿到页面列表，确定目标页面（如 `10371:87078`）。
+2. `list_pages` 拿到页面列表，确定目标页面（如 `10371:87078`）；
+3. `get_file_nodes` 全量读取文件内所有节点（页面/图层/组件实例）的 id 与名称，可按名搜索定位到具体图层。
+
+> `get_file_nodes` 会全量下载 `/data/{fileKey}`（实测单个文件约数十 MB），因此首次调用较慢，之后 5 分钟内命中缓存。注意：当前仅返回节点的 id/名称索引，父子层级、类型、几何仍需后续逆向。
 
 > 更多读取能力见下方 Roadmap，正在通过网页二进制自研逐步加入。
 
@@ -82,12 +86,13 @@ src/
   config.ts       # 配置加载（命令行参数 + 环境变量 + .env）
   mastergo.ts     # HTTP 客户端：网页 API + 缓存
   page-index.ts   # 私有二进制页面索引解析（双 marker 逆向）
+  node-index.ts   # 私有二进制全量节点索引解析（页面/节点位标记区分 + 去重）
   tools.ts        # MCP 工具定义与参数
 ```
 
 ## 待实现能力（Roadmap · 均基于网页接口自研）
 
-- [ ] **图层/节点深度读取**：二进制 DSL 的完整节点树解码（当前仅提取页面索引）
+- [ ] **图层/节点深度读取**：二进制 DSL 的完整节点树解码（已提取全量节点 id/名称索引 `get_file_nodes`；父子层级 / 类型 / 几何仍未解码）
 - [ ] **组件与样式资源**：读取文件级组件库、颜色/文字/效果样式
 - [ ] **变量（Variables）**：Design Tokens 的读取与引用关系
 - [ ] **图片/切图导出**：节点导出为 PNG/SVG/PDF，可交付到本地目录

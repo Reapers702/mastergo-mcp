@@ -5,7 +5,8 @@
  * 当前已实现：
  *   - get_file_meta：文件元信息（/api/v1/documents/{id}）
  *   - list_pages：页面列表（解析 /data/{fileKey} 私有二进制索引）
- * 更深的读取能力（节点树 / 组件 / 样式 / 导出）将在后续通过网页二进制自研增量加入。
+ *   - get_file_nodes：全量节点索引（页面 + 全部名节点的 id/名称，可搜索过滤）
+ * 更深的读取能力（节点树层级 / 类型 / 组件 / 样式 / 导出）将在后续通过网页二进制自研增量加入。
  */
 
 import { z } from "zod";
@@ -76,6 +77,59 @@ export function buildTools(): ToolDef[] {
         if (!fileKey) throw new MasterGoError("无法获取 fileKey，请检查文件 ID 与访问权限");
         const pages = await client.getFilePageList(fileKey);
         return jsonOut({ source: "web-data-index", fileId, fileKey, totalPages: pages.length, pages });
+      },
+    },
+
+    {
+      name: "get_file_nodes",
+      description:
+        "列出 MasterGo 设计文件的全量节点索引（页面 + 全部名节点）。" +
+        "通过浏览器 Cookie 全量下载 /data/{fileKey} 私有二进制并解析得出（可能需下载数十 MB）。" +
+        "绝大多数图层/节点记录位于文件头部 8MB 之后，因此这是读取节点/图层的第一步。" +
+        "可选参数 search 按节点名子串过滤，limit 限制返回条数。" +
+        "注意：当前只返回节点的 id 与名称索引，父子层级/类型/几何仍需后续逆向。",
+      params: {
+        file: z.string().describe("MasterGo 文件 ID 或完整文件 URL（必填）"),
+        search: z
+          .string()
+          .optional()
+          .describe("节点名子串过滤（可选），例如搜索某个页面/组件名"),
+        limit: z
+          .number()
+          .int()
+          .min(1)
+          .max(5000)
+          .optional()
+          .describe("最多返回的节点条数（可选，默认 200；0 表示不限制则返回全部，可能较大）"),
+      },
+      run: async (client, args) => {
+        const { fileId } = normalize(String(args.file));
+        const meta = await client.getFileMeta(fileId);
+        const fileKey: string | undefined = meta.data?.fileKey;
+        if (!fileKey) throw new MasterGoError("无法获取 fileKey，请检查文件 ID 与访问权限");
+
+        const { pages, nodes } = await client.getFileNodes(fileKey);
+        const search = args.search ? String(args.search) : undefined;
+        const limit = typeof args.limit === "number" ? args.limit : 200;
+
+        const filtered = search
+          ? nodes.filter((n) => n.name.includes(search))
+          : nodes;
+        const matched = filtered.length;
+        const output = limit > 0 ? filtered.slice(0, limit) : filtered;
+
+        return jsonOut({
+          source: "web-data-node-index",
+          fileId,
+          fileKey,
+          totalPages: pages.length,
+          totalNodes: nodes.length,
+          search,
+          matched,
+          returned: output.length,
+          pages,
+          nodes: output,
+        });
       },
     },
   ];
