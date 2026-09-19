@@ -34,13 +34,33 @@
  *     4 角一致则输出数值，否则输出 [r1,r2,r3,r4]）
  *
  * 已知局限：
- *   - rotation / transform / fill(颜色) / stroke / 布局约束(layout) 未解码，留待后续。
+ *   - fill(颜色) / stroke / 布局约束(layout) 未解码，留待后续。
  *
  * 坐标符号已破解（2026-09，178/178 x 与 177/177 y 对照浏览器 API 真值一致）：
  *   18 块内 x/y 使用**带符号**紧凑浮点（decFloatSigned），符号位是 24 位小端尾数
  *   最低尾数字节 bit0：置 1 表示负、清 0 表示正。利用整数浮点尾数精度余量存储符号，
  *   解码时先清除该位还原纯幅度再决定正负。
+ *
+ * rotation / transform 已破解（2026-09，8 个 rotation 节点对照浏览器 relativeTransform 真值 100%）：
+ *   18 块不只是 x/y：它容纳完整仿射变换。子 01=tx(x)、02=ty(y)，
+ *   子 03..06 按 (m00, m11, m01, m10) 顺序打包 2×2 矩阵 m = [[s3,s5],[s6,s4]]。
+ *   rotation = atan2(m10, m00)（单位度）。无旋转时子 03..06 省略（单位阵）。
  */
+export interface NodeTransform {
+  /** 平移 tx（即 x 坐标） */
+  tx: number;
+  /** 平移 ty（即 y 坐标） */
+  ty: number;
+  /** 2×2 线性部分 m00 */
+  m00: number;
+  /** m01 */
+  m01: number;
+  /** m10 */
+  m10: number;
+  /** m11 */
+  m11: number;
+}
+
 export interface NodeGeometry {
   /** 节点包围盒宽度（无符号紧凑浮点解码，可靠） */
   width: number | null;
@@ -56,6 +76,10 @@ export interface NodeGeometry {
   y: number;
   /** 坐标符号是否已解析（当前恒为 true，符号位已破解） */
   positionSignResolved: boolean;
+  /** rotation（度，由 18 块变换矩阵 atan2 推导；无旋转为 0） */
+  rotation: number;
+  /** 完整仿射变换（含平移与 2×2 线性部分；无旋转时线性部分为单位阵） */
+  transform: NodeTransform;
 }
 
 export interface TreeNode {
@@ -250,6 +274,8 @@ function parseNodeGeometry(
     x: 0,
     y: 0,
     positionSignResolved: true,
+    rotation: 0,
+    transform: { tx: 0, ty: 0, m00: 1, m01: 0, m10: 0, m11: 1 },
   };
 
   // width(0e) / height(0f)：尺寸在 [0.001, 50000] 之间
@@ -258,23 +284,37 @@ function parseNodeGeometry(
   // opacity(0a)：仅当 !=1 时存在，值域 [0, 1]
   g.opacity = findFloatField(buf, geomPos, end, 0x0a, 0, 1);
 
-  // x / y：定位 18 容器块「18 <sub...> 00」，sub01=x、sub02=y，各跟 4 字节带符号紧凑浮点
+  // x / y 与完整仿射变换：18 块「18 <子块...> 00」。
+  //   子 01=tx(x)、02=ty(y)（各 4 字节带符号紧凑浮点）
+  //   子 03..06 按 (m00, m11, m01, m10) 顺序打包 2×2 矩阵 → m = [[s3,s5],[s6,s4]]
+  //   值为 0 的子以单字节 00 标志存放，非 0 以 4 字节带符号紧凑浮点存放；块以 00 结束。
   const stop18 = Math.min(end, geomPos + 256);
   for (let i = geomPos; i + 1 < stop18; i++) {
     if (buf[i] !== 0x18) continue;
     let j = i + 1;
+    const subs: Record<number, number> = {};
     while (j < end && buf[j] !== 0) {
       const sub = buf[j];
-      if (sub === 0x01 && j + 5 <= end && plausibleTag(buf[j + 1])) {
-        g.x = decFloatSigned(buf, j + 1);
+      const tag = buf[j + 1];
+      if (sub >= 1 && sub <= 6 && j + 5 <= end && plausibleTag(tag)) {
+        subs[sub] = decFloatSigned(buf, j + 1);
         j += 5;
-      } else if (sub === 0x02 && j + 5 <= end && plausibleTag(buf[j + 1])) {
-        g.y = decFloatSigned(buf, j + 1);
-        j += 5;
+      } else if (sub >= 3 && sub <= 6 && tag === 0x00) {
+        subs[sub] = 0; // 0 值以单字节 00 标志存放
+        j += 2;
       } else {
         j += 1;
       }
     }
+    g.x = subs[1] ?? 0;
+    g.y = subs[2] ?? 0;
+    // 矩阵子 03..06 为 (m00, m11, m01, m10)；缺省为单位阵
+    const m00 = subs[3] ?? 1;
+    const m11 = subs[4] ?? 1;
+    const m01 = subs[5] ?? 0;
+    const m10 = subs[6] ?? 0;
+    g.rotation = (Math.atan2(m10 || 0, m00 || 0) * 180) / Math.PI;
+    g.transform = { tx: g.x, ty: g.y, m00, m01, m10, m11 };
     break; // 已定位首个 18 块
   }
 
