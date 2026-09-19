@@ -32,9 +32,11 @@
  *   - opacity：透明度 0..1（字段 0a，仅当 != 1 时存在）
  *   - cornerRadius：圆角（仅 RECTANGLE；几何段首个 1c 类型块内子块「01 04 + 4×浮点」，
  *     4 角一致则输出数值，否则输出 [r1,r2,r3,r4]）
+ *   - strokeWeight：描边宽度（字段 10，位于 13 引用块之前；`10 00`=0 隐藏描边、
+ *     4 字节紧凑浮点为权重、无该字段默认 1。实测 63/63 与浏览器真值一致）
  *
  * 已知局限：
- *   - fill(颜色) / stroke / 布局约束(layout) 未解码，留待后续。
+ *   - 布局约束(layout：flexMode/padding/itemSpacing) 未解码，留待后续。
  *
  * 坐标符号已破解（2026-09，178/178 x 与 177/177 y 对照浏览器 API 真值一致）：
  *   18 块内 x/y 使用**带符号**紧凑浮点（decFloatSigned），符号位是 24 位小端尾数
@@ -380,6 +382,28 @@ function parseNodeGeometry(
   g.height = findFloatField(buf, geomPos, end, 0x0f, 0.001, 50000);
   // opacity(0a)：仅当 !=1 时存在，值域 [0, 1]
   g.opacity = findFloatField(buf, geomPos, end, 0x0a, 0, 1);
+
+  // strokeWeight（描边宽度，2026-09 破解，63/63 与浏览器真值一致）：
+  //   位于几何段内、13 引用块（`13 01/02/03`）之前，key=0x10：
+  //     `10 00`                → 0（隐藏描边，无可见边框）
+  //     `10 <4字节紧凑浮点>`   → 权重值
+  //     无 10 字段             → 默认 1
+  {
+    let swStop = Math.min(end, geomPos + 256);
+    for (let i = geomPos; i + 1 < swStop; i++) {
+      if (buf[i] === 0x13 && (buf[i + 1] === 0x01 || buf[i + 1] === 0x02 || buf[i + 1] === 0x03)) {
+        swStop = i;
+        break;
+      }
+    }
+    for (let i = geomPos; i + 2 <= swStop; i++) {
+      if (buf[i] !== 0x10) continue;
+      if (buf[i + 1] === 0x00) { g.strokeWeight = 0; break; }
+      const v = decFloat(buf, i + 1);
+      if (plausibleTag(buf[i + 1]) && v > 0 && v <= 5000) { g.strokeWeight = v; break; }
+    }
+    if (g.strokeWeight === null) g.strokeWeight = 1; // 默认 1
+  }
 
   // x / y 与完整仿射变换：18 块「18 <子块...> 00」。
   //   子 01=tx(x)、02=ty(y)（各 4 字节带符号紧凑浮点）
