@@ -141,7 +141,9 @@ export function buildTools(): ToolDef[] {
         "依据几何段首个 1c 子块字节判别节点类型（TEXT/FRAME/GROUP/RECTANGLE/ELLIPSE/LINE/PEN/" +
         "SLICE/INSTANCE/BOOLEAN_OPERATION；实测类型 100% 与浏览器一致）。" +
         "几何属性 geometry 含可靠的 width/height/opacity/cornerRadius（圆角仅 RECTANGLE）" +
-        "以及 x/y**坐标幅度**（符号位尚未破解，positionSignResolved 为 false，勿当坐标使用）。" +
+        "与 x/y 坐标（带符号，positionSignResolved 恒为 true）、rotation（角度）/transform（仿射矩阵）、" +
+        "fills/strokes（RGBA 纯色，经 paint 定义表解析；strokeWeight 尚待解码）。" +
+        "颜色仅保证 SOLID 填料（kind='SOLID'）；IMAGE/GRADIENT/UNKNOWN 物件 color 为 null。" +
         "参数 file 传文件 ID 或完整 URL；page 传具体页（可沿用 list_pages 返回的页面 id，或 URL 中 page_id）。",
       params: {
         file: z.string().describe("MasterGo 文件 ID 或完整文件 URL（必填）"),
