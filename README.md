@@ -180,13 +180,15 @@ src/
 - **现状**：未实现。火车票文件 0 个效果样式。
 - **从何入手**：流程同 ②——打开含效果样式的设计稿 → `getLocalEffectStyles()` 导真值 → 搜 `ukey` 定位效果样式聚合记录 → 观察其 subtype 与结构（阴影颜色多半走 compact 浮点 RGBA，坐标走带符号 compact 浮点）。阴影的 `blur` 结构与 AutoCAD/Figma 的 drop-shadow JSON 类似，二进制里大概率是若干紧凑浮点 + 一个颜色块。
 
-### ④ 组件列表（Components）
-- **目标字段**：文件组件库里的 `COMPONENT` 定义节点（id、名称、所属 frame）、`INSTANCE` 与 `COMPONENT` 的引用关系。
-- **现状**：未实现。火车票文件用 `getComponentListVal()` 真值观察约 383 个组件（96 个本地），但 `decodeNodeType`（`node-tree.ts` 的 `TYPE_1C` + `1c 07` 分支）**尚未识别 COMPONENT**——目前把带子节点的组件统一归为 `FRAME`。`INSTANCE` 已能在 `1c 07 06` 判出。
+### ④ 组件列表（Components）—— 部分完成（modern 已识别 COMPONENT）
+- **目标字段**：文件组件库里的 `COMPONENT` 定义节点（id、名称、所属 frame）、`INSTANCE` 与 `COMPONENT` 的引用关系、`COMPONENT_SET`。
+- **已完成（modern 格式）**：`decodeModernContainer` 已能判出 `COMPONENT`（几何段含自引用 ukey `<fileId>+<selfId>`）与 `INSTANCE`（`1a <componentId>` 指向已识别组件，两遍解码）。已知取舍：COMPONENT_SET 折叠进 COMPONENT（48 例错判；最优候选判别式精确率仅 79%，故不引入猜测）。
+- **仍缺（legacy 格式）**：`decodeNodeType` 的 legacy `1c 07` 分支**仍未识别 COMPONENT**（只有 `06`=INSTANCE、`03/09/0a`=FRAME、`01 00 09/0a`=GROUP、`01 00 02`=BOOLEAN_OPERATION），带子节点的组件会被归为 `FRAME`。火车票页面真值恰好不含 COMPONENT，所以 828/829 的「0 错判」**并未覆盖**这一点。
 - **从何入手**：
-  1. `evaluate_script` 调 `getComponentListVal()`，导出组件 id 列表（含本地/外部标记）存真值。
-  2. 拿一两个本地组件 id，在二进制搜 `01 <组件id>\0`，定位其节点记录，用几何段首个 `1c` 子块**第 2/3 字节**去比对——`FRAME` 是 `1c 07 03/09/0a`，`INSTANCE` 是 `1c 07 06`，那么 `COMPONENT` 大概率是 `1c 07 0?` 里某个未映射值（试 `01/02/07/08` 等）。
-  3. 在 `TYPE_1C`/`decodeNodeType` 的 `1c 07` 分支补一个映射值，用全量组件 id 断言命中率，再落地。
+  1. `evaluate_script` 调 `getComponentListVal()` 导出组件 id 真值（含本地/外部标记），**同时把该文件 `/data` 整份存盘**。
+  2. **首选验证 `hasSelfUkey` 是否格式无关**：modern 下「几何段含 `+<selfId>\0`」是 COMPONENT 的精确判据（零假阳性），而 ukey 机制与容器编码无关，legacy 很可能同构。做法：对 legacy 火车票统计「几何段含自引用 ukey」的节点，看它们当前被判成什么——若大量落在 `FRAME`，即命中上述盲区。
+  3. ⚠️ **不要再用「首个 `1c` 块第 2/3 字节试值」的思路**（本节原文的建议）：modern 下容器块统一为 `1c 07 01 01 02 00 …`，试值法完全失效；legacy 下已知值也已用尽。
+- **验证方式**：真值需按「所属根节点」分组、对每个根调 `parsePageTree`（单遍扫描覆盖不到实例内部节点），再逐节点比对。
 
 ### ⑤ 变量（Variables / Design Tokens）
 - **目标字段**：变量集合（collection）、变量组、变量（数值/颜色/字符串）、每个变量在节点/样式上的引用关系。
