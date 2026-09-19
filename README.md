@@ -72,7 +72,13 @@ npx tsx src/index.ts --cookie "gfsessionid=..." --url https://mastergo.com
 3. `get_page_tree` 传入目标页面，得到整棵图层树（含节点类型、父子层级）；
 4. `get_file_nodes` 可按名搜索全文件节点，快速定位具体图层。
 
-> `get_file_nodes` / `get_page_tree` 会全量下载 `/data/{fileKey}`（实测单个文件约数十 MB），因此首次调用较慢，之后 5 分钟内命中缓存。`get_page_tree` 通过逆向节点记录（`01=id / 02=parent / 03=类型码 / 04=name`）重建层级，并通过几何段首个 `1c` 子块字节判别类型（TEXT/FRAME/GROUP/RECTANGLE/ELLIPSE/LINE/PEN/SLICE/INSTANCE/BOOLEAN_OPERATION），实测父/子与类型均 100% 与浏览器一致。
+> `get_file_nodes` / `get_page_tree` 会全量下载 `/data/{fileKey}`（实测单个文件约数十 MB），因此首次调用较慢，之后 5 分钟内命中缓存。`get_page_tree` 通过逆向节点记录（`01=id / 02=parent / 03=类型码 / 04=name`）重建层级，并通过几何段首个 `1c` 子块字节判别类型（TEXT/FRAME/GROUP/RECTANGLE/ELLIPSE/LINE/PEN/SLICE/INSTANCE/BOOLEAN_OPERATION）。
+>
+> **两套容器编码（重要）**：MasterGo 先后使用过两套容器编码，**用同一套规则硬解另一种格式会造成大面积错判**（实测新格式命中率 0%、且把 GROUP 误判为 BOOLEAN_OPERATION）。因此解码前先按文件判定格式——依据「类型块为 `1c 07 01 01` 的节点占比」，旧格式约 1%（火车票 2413/188731）、新格式约 50%（Ant Design 5.0 147383/295784）：
+> - **legacy**（火车票等早期文件）：父子层级与类型实测 **828/829 = 99.9%**（0 错判）；
+> - **modern**（Ant Design 5.0 等较新文件）：容器类型块统一为 `1c 07 01 0?`，目前**只解出实测精确的部分**——GROUP（`1c 07 01 00`，覆盖真值 784/790 且零假阳性）、COMPONENT（几何段含组件 ukey `<fileId>+<selfId>`）、INSTANCE（`1a` 指向已识别组件）；**FRAME 等其余容器一律返回 `null`，宁可判空也不猜错**。
+>   实测（Ant Design 5.0，73620 条容器真值，逐根走真实 `parsePageTree`）：改造前 **命中 0 / 错判 740（其中 GROUP→BOOLEAN_OPERATION 466）**，改造后 **命中 6140 / 错判 303**。剩余错判为两处**已知局限**，均因判别式精确率不足而未引入猜测：① 255 条「容器→LINE/RECTANGLE」——其几何段首个 `1c` 恰是叶子标记（段内也存在容器块，但让容器块压过叶子标记只有 55% 精确率）；② 48 条 COMPONENT_SET→COMPONENT——实测仅 24.9% 的 COMPONENT_SET 带 ukey，最优候选判别式精确率仅 79%。
+> - 叶子类型（TEXT/RECTANGLE/ELLIPSE/LINE/PEN/SLICE）两套格式共用同一判别，不受影响。
 
 ## 权限说明（重要）
 
@@ -94,7 +100,7 @@ src/
 
 ## 待实现能力（Roadmap · 均基于网页接口自研）
 
-- [x] **图层/节点深度读取**：完整节点树已解码（id / 名称 / 类型 / 父子层级，`get_page_tree`，父/子与类型实测 100%）
+- [x] **图层/节点深度读取**：完整节点树已解码（id / 名称 / 类型 / 父子层级，`get_page_tree`）。类型解码已支持**两套容器编码**（按文件自动判定，见上文「两套容器编码」）：legacy 实测 828/829 = 99.9%（0 错判）；modern 命中率 8.3%、错判率 0.41%（FRAME 等仍在逆向，当前返回 `null` 而非猜错）
 - [ ] **几何与布局属性（部分完成）**：尺寸（width/height）、透明度（opacity）、圆角（cornerRadius，RECTANGLE）、x/y 坐标（带符号）、rotation/transform 已在 `get_page_tree` 的 `geometry` 输出，实测与浏览器一致（178 x / 177 y 对照 100%）。
   - x/y 符号位已破解：坐标为 18 块内 `01/02` 子块跟随的**带符号**紧凑浮点，符号位是 24 位小端尾数最低字节 bit0（置 1 为负、清 0 为正，`positionSignResolved` 恒为 `true`）。
   - rotation/transform 已破解：18 块容纳完整仿射变换，子 `01=tx(x)`、`02=ty(y)`、`03..06` 按 `(m00,m11,m01,m10)` 顺序打包 2×2 矩阵 `m=[[s3,s5],[s6,s4]]`，`rotation = atan2(m10,m00)`（度；无旋转子 03..06 省略为单位阵）。8 个 rotation 节点对照浏览器 `relativeTransform` 真值 8/8 一致。

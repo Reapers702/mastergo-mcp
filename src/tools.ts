@@ -89,7 +89,7 @@ export function buildTools(): ToolDef[] {
         "通过浏览器 Cookie 全量下载 /data/{fileKey} 私有二进制并解析得出（可能需下载数十 MB）。" +
         "绝大多数图层/节点记录位于文件头部 8MB 之后，因此这是读取节点/图层的第一步。" +
         "可选参数 search 按节点名子串过滤，limit 限制返回条数。" +
-        "注意：当前只返回节点的 id 与名称索引，父子层级/类型/几何仍需后续逆向。",
+        "注意：本工具只返回节点的 id 与名称索引；需要类型/父子层级/几何请用 get_page_tree。",
       params: {
         file: z.string().describe("MasterGo 文件 ID 或完整文件 URL（必填）"),
         search: z
@@ -141,7 +141,9 @@ export function buildTools(): ToolDef[] {
         "获取指定页面的节点树：节点 id、名称、类型、父节点 id、几何/布局属性、父子层级结构（可遍历整棵图层树）。" +
         "通过浏览器 Cookie 全量下载 /data/{fileKey} 私有二进制，依据节点记录 02=parent 重建层级、" +
         "依据几何段首个 1c 子块字节判别节点类型（TEXT/FRAME/GROUP/RECTANGLE/ELLIPSE/LINE/PEN/" +
-        "SLICE/INSTANCE/BOOLEAN_OPERATION；实测类型 100% 与浏览器一致）。" +
+        "SLICE/INSTANCE/BOOLEAN_OPERATION），并自动适配 MasterGo 先后使用过的两套容器编码：" +
+        "legacy（早期文件）实测 828/829 = 99.9%；modern（较新文件）只解出实测精确的 " +
+        "GROUP/COMPONENT/COMPONENT_SET/INSTANCE，其余容器返回 null 而不猜错。" +
         "几何属性 geometry 含可靠的 width/height/opacity/cornerRadius（圆角仅 RECTANGLE）" +
         "与 x/y 坐标（带符号，positionSignResolved 恒为 true）、rotation（角度）/transform（仿射矩阵）、" +
         "fills/strokes（RGBA 纯色，经 paint 定义表解析）、strokeWeight（描边宽度，实测 63/63 与浏览器一致）、" +

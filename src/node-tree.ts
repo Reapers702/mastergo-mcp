@@ -266,8 +266,12 @@ function parseRawRecord(buf: Buffer, pos: number): RawRec {
 }
 
 /**
- * 解码节点类型：在几何段 [geomPos, end) 内找第一个合法的 1c 子块，
- * 其原生字节即类型判别依据。实测 808 节点 100% 准确。
+ * 解码节点类型：在几何段 [geomPos, end) 内找 1c 类型块，其原生字节即判别依据。
+ *
+ * MasterGo 先后使用过两套容器编码，**必须按文件分别解码**（见 detectNodeFormat）：
+ *   legacy —— 早期文件（火车票等），实测 828/829 (99.9%)；
+ *   modern —— 较新文件（Ant Design 5.0 等），容器统一为 `1c 07 01 0?`。
+ * 用同一套规则硬解另一格式会造成大面积错判（modern 下命中率 0%）。
  * 页面根（PAGE）走 09 页面级记录，不在此判别，返回 null。
  */
 const TYPE_1C: Record<number, string> = {
@@ -279,13 +283,124 @@ const TYPE_1C: Record<number, string> = {
   0x01: "PEN",
 };
 
-function decodeNodeType(buf: Buffer, geomPos: number, end: number): string | null {
+/** 节点编码格式：两套容器编码需按文件判定，混用会导致大量错判。 */
+export type NodeFormat = "legacy" | "modern";
+
+/** 几何段内第一个 0x1c 子块的位置（类型判别块起点）。 */
+function findTypeBlock(buf: Buffer, geomPos: number, end: number): number {
+  for (let p = geomPos; p + 4 < end; p++) if (buf[p] === 0x1c) return p;
+  return -1;
+}
+
+/** 几何段内第一个容器类型块 `1c 07 01` 的位置。 */
+function findContainerBlock(buf: Buffer, geomPos: number, end: number): number {
+  for (let p = geomPos; p + 4 < end; p++) {
+    if (buf[p] === 0x1c && buf[p + 1] === 0x07 && buf[p + 2] === 0x01) return p;
+  }
+  return -1;
+}
+
+/**
+ * 判定文件的节点编码格式。
+ *
+ * 新格式容器的类型块统一为 `1c 07 01 01`（FRAME/COMPONENT/COMPONENT_SET/INSTANCE），
+ * 该模式在旧格式中几乎不出现，故以它的占比判别：
+ *   火车票 1.3%（2413/188731）→ legacy；Ant Design 5.0 49.8%（147383/295784）→ modern。
+ */
+function detectNodeFormat(
+  buf: Buffer,
+  segments: Array<{ geomPos: number; end: number }>,
+): NodeFormat {
+  let total = 0;
+  let modern = 0;
+  for (const s of segments) {
+    const p = findTypeBlock(buf, s.geomPos, s.end);
+    if (p < 0) continue;
+    total++;
+    if (buf[p + 1] === 0x07 && buf[p + 2] === 0x01 && buf[p + 3] === 0x01) modern++;
+  }
+  return total > 0 && modern / total > 0.1 ? "modern" : "legacy";
+}
+
+/** 几何段内是否含本节点的组件 ukey（形如 `<fileId>+<selfId>`）。 */
+function hasSelfUkey(buf: Buffer, geomPos: number, end: number, selfId: string): boolean {
+  if (end <= geomPos) return false;
+  return buf.subarray(geomPos, end).indexOf(Buffer.from(`+${selfId}\0`)) >= 0;
+}
+
+/** 几何段内第一个形如 `1a <componentId>` 的母版组件引用。 */
+function findComponentRef(buf: Buffer, geomPos: number, end: number): string | null {
+  for (let p = geomPos; p + 1 < end; p++) {
+    if (buf[p] !== 0x1a) continue;
+    const s = readCstr(buf, p + 1);
+    if (s && ID_RE.test(s.s)) return s.s;
+  }
+  return null;
+}
+
+/**
+ * 新格式容器类型判别。
+ *
+ * 只采用实测精确的特征，无法确定时返回 null —— 宁可判空也不猜错
+ * （旧实现把 modern 的 GROUP 误判为 BOOLEAN_OPERATION）：
+ *   `1c 07 01 00`     → GROUP（覆盖 GROUP 真值 784/790，零假阳性）
+ *   几何段含 selfUkey → COMPONENT
+ *   `1a` 指向已知组件 → INSTANCE
+ *   其余（含 FRAME）   → null
+ *
+ * 已知局限：COMPONENT_SET 并入 COMPONENT。实测只有 24.9%（48/193）的 COMPONENT_SET
+ * 带 selfUkey，且在其上找不到高精确判别式（最优候选 `几何段第2字节==01 && 含 06 01`
+ * 精确率仅 79%、会误标 7 个 COMPONENT、只多命中 27 个），故不引入该猜测。
+ */
+function decodeModernContainer(
+  buf: Buffer,
+  p: number,
+  geomPos: number,
+  end: number,
+  selfId: string,
+  knownComponents: Set<string> | null,
+): string | null {
+  if (buf[p + 3] === 0x00) return "GROUP";
+  if (hasSelfUkey(buf, geomPos, end, selfId)) return "COMPONENT";
+  if (knownComponents) {
+    const ref = findComponentRef(buf, geomPos, end);
+    if (ref && knownComponents.has(ref)) return "INSTANCE";
+  }
+  return null;
+}
+
+function decodeNodeType(
+  buf: Buffer,
+  geomPos: number,
+  end: number,
+  selfId: string,
+  format: NodeFormat,
+  knownComponents: Set<string> | null,
+): string | null {
+  if (format === "modern") {
+    const p = findTypeBlock(buf, geomPos, end);
+    if (p >= 0) {
+      const b = buf[p + 1];
+      if (b === 0x07 && buf[p + 2] === 0x01) {
+        return decodeModernContainer(buf, p, geomPos, end, selfId, knownComponents);
+      }
+      // 首个 1c 既不是容器块也不是叶子标记时，叶子判别不可信：段内若存在容器块则按容器处理。
+      // 实测这类记录 1360 个，其中 1116 个真值为容器（精确率 82.1%）；而首个 1c 是叶子标记的
+      // 115237 个记录判别完全不变。
+      if (TYPE_1C[b] === undefined) {
+        const cp = findContainerBlock(buf, geomPos, end);
+        if (cp >= 0) return decodeModernContainer(buf, cp, geomPos, end, selfId, knownComponents);
+      }
+    }
+    // 非容器（文本/矩形/椭圆等）继续沿用下方的叶子扫描
+  }
+
   for (let p = geomPos; p + 1 < end; p++) {
     if (buf[p] !== 0x1c) continue;
     const b = buf[p + 1];
     const leaf = TYPE_1C[b];
     if (leaf) return leaf;
-    if (b === 0x07) {
+    if (b === 0x07 && format === "legacy") {
       const c = buf[p + 2];
       if (c === 0x06) return "INSTANCE";
       if (c === 0x03 || c === 0x09 || c === 0x0a) return "FRAME";
@@ -796,6 +911,31 @@ export function parsePageTree(buf: Buffer, pageId: string): PageTree {
     geomEnd.set(byPos[i].id, next);
   }
 
+  // 判定节点编码格式：两套容器编码混用会造成大面积错判
+  const format = detectNodeFormat(
+    buf,
+    byPos.map((r) => ({ geomPos: r.geomPos, end: geomEnd.get(r.id) ?? buf.length })),
+  );
+
+  // 第一遍解类型，并收集已识别的组件（供第二遍解析实例的母版引用）
+  const typeOf = new Map<string, string | null>();
+  const components = new Set<string>();
+  for (const [id, r] of byId) {
+    const end = geomEnd.get(id) ?? buf.length;
+    const t = decodeNodeType(buf, r.geomPos, end, id, format, null);
+    typeOf.set(id, t);
+    if (t === "COMPONENT" || t === "COMPONENT_SET") components.add(id);
+  }
+  // 第二遍：modern 下用 `1a <componentId>` 引用补齐 INSTANCE
+  if (format === "modern" && components.size > 0) {
+    for (const [id, r] of byId) {
+      if (typeOf.get(id) != null) continue;
+      const end = geomEnd.get(id) ?? buf.length;
+      const t = decodeNodeType(buf, r.geomPos, end, id, format, components);
+      if (t != null) typeOf.set(id, t);
+    }
+  }
+
   // 构建节点对象（含一面 paint 表用于 fill/stroke 颜色）
   const paintMap = buildPaintTable(buf);
   const tnodes = new Map<string, TreeNode>();
@@ -805,7 +945,7 @@ export function parsePageTree(buf: Buffer, pageId: string): PageTree {
       parent = pageId; // 页面顶层节点
     }
     const end = geomEnd.get(id) ?? buf.length;
-    const type = decodeNodeType(buf, r.geomPos, end);
+    const type = typeOf.get(id) ?? null;
     tnodes.set(id, {
       id,
       name: r.name,
