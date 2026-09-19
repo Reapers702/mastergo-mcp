@@ -89,6 +89,15 @@ npx tsx src/index.ts --cookie "gfsessionid=..." --url https://mastergo.com
 > 1. **忽略 `Range`**：带 `Range: bytes=0-8388607` 仍返回 `HTTP 200` + 完整 `content-length`（无 `content-range` / `accept-ranges`），所以 `list_pages` 实际也会下载整个文件。客户端据此在「未请求分段」或「请求了分段但返回 200（而非 206）」时按**全量缓存**，避免随后的 `get_page_tree` 重复下载同一个数十 MB 文件（实测省下约 2s 下载）。
 > 2. **响应不可字节复现**：同一未变动文件（`updateAt` 三次查询一致）连续下载会得到**不同 md5**，长度相同但可有数千万字节差异（疑似记录序列化顺序随机）。因此**回归对比必须按结构（节点 id / 类型 / 层级），不要用 md5 或整文件 diff**。已验证解析器对此稳健：两份字节差异达 4353 万字节的新下载，均解析出同样的 **828/829** 类型结果、且逐节点类型完全一致（919 相同 / 0 不同）。
 
+## 回归测试（node-tree 类型解码守卫）
+
+`npm run test:regress` → 逐 PAGE 根 `parsePageTree`，断言节点类型解码不退化。
+配套真值已入库 `test/fixtures/train_ticket_truth.json`（火车票公开文件，829 条，字段名 `type`）。当前基线 **828/828 命中、0 错判**。
+
+- **数据来源**：火车票文件 `isPublic: true`，无需认证即可下载，因此 CI 也能跑。默认实时下载 `/data/{fileKey}`（~47MB，首次较慢）。
+- **本地加速**：已有快照时设 `MG_REGRESS_SRC` 指向它即可跳过下载；`MG_REGRESS_CACHE` 可把在线下载结果缓存一份供下次复用。
+- **比对方式**：**按结构/类型比对**，绝不 md5 / 整文件 diff——`/data` 响应不可字节复现（见上文）。
+
 ## 权限说明（重要）
 
 - **公开文件（`isPublic: true`）无需任何认证**：实测不带 Cookie、甚至带无效 Cookie，`GET /api/v1/documents/{fileId}` 与 `/data/{fileKey}` 均返回 `200` 与完整数据。因此客户端**不做 Cookie 前置校验**（前置拦截会让公开文件的 `list_pages` / `get_page_tree` 误失败）；
