@@ -20,6 +20,38 @@
  *   （实测 808 节点 100% 准确，见 decodeNodeType）。
  */
 
+/**
+ * 节点几何/布局属性。
+ *
+ * 已知可靠解码（实测与浏览器 API 真值一致）：
+ *   - width / height：节点包围盒尺寸（字段 0e / 0f，紧凑浮点）
+ *   - opacity：透明度 0..1（字段 0a，仅当 != 1 时存在）
+ *   - cornerRadius：圆角（仅 RECTANGLE；几何段首个 1c 类型块内子块「01 04 + 4×浮点」，
+ *     4 角一致则输出数值，否则输出 [r1,r2,r3,r4]）
+ *
+ * 已知局限：
+ *   - x / y：紧凑浮点为**无符号幅度**编码，符号位不在此格式内，父-子变换也无法恢复
+ *     （已用同一文件中 1257→-1257 与 1920→+1920 的顶层节点对排除"全局平移"假设）。
+ *     因此 x / y 只输出幅度值，positionSignResolved 固定为 false，方向待后续逆向。
+ *   - rotation / transform / fill(颜色) / stroke / 布局约束(layout) 未解码，留待后续。
+ */
+export interface NodeGeometry {
+  /** 节点包围盒宽度（无符号紧凑浮点解码，可靠） */
+  width: number | null;
+  /** 节点包围盒高度（可靠） */
+  height: number | null;
+  /** 透明度 0..1（可靠；只有 !=1 时才存在） */
+  opacity: number | null;
+  /** 圆角（仅 RECTANGLE；4 角一致为数值，否则 4 元数组） */
+  cornerRadius: number | number[] | null;
+  /** x 坐标**幅度**（符号位未解析，勿作坐标使用） */
+  x: number;
+  /** y 坐标**幅度**（符号位未解析，勿作坐标使用） */
+  y: number;
+  /** 坐标符号是否已解析（当前恒为 false，方向未知） */
+  positionSignResolved: boolean;
+}
+
 export interface TreeNode {
   id: string;
   name: string;
@@ -30,6 +62,8 @@ export interface TreeNode {
   anchor: string | null;
   /** 解码后的节点类型（见文件头说明）；未知为 null */
   type: string | null;
+  /** 几何/布局属性（含可靠字段与坐标幅度） */
+  geometry: NodeGeometry;
 }
 
 export interface PageTree {
@@ -138,6 +172,119 @@ function decodeNodeType(buf: Buffer, geomPos: number, end: number): string | nul
 }
 
 /**
+ * 解码 MasterGo 紧凑浮点：4 字节 = 1 字节 tag（有偏指数）+ 3 字节小端尾数。
+ *   value = (2^24 + intLE) * 2^(tag - 151)
+ * 该编码**无符号位**，只表达幅度（负数符号不在格式内）。
+ */
+function decFloat(buf: Buffer, p: number): number {
+  const tag = buf[p];
+  const intLE = buf[p + 3] * 65536 + buf[p + 2] * 256 + buf[p + 1];
+  return (0x1000000 + intLE) * Math.pow(2, tag - 151);
+}
+
+/** tag 合理范围护栏：太大/太小都视为非紧凑浮点字段 */
+function plausibleTag(tag: number): boolean {
+  return tag >= 0x60 && tag <= 0xa0;
+}
+
+/**
+ * 在几何段窗口内，定位 `<key> <紧凑浮点>` 字段（值落在 [lo, hi] 内才采信）。
+ * 逐字节扫不可靠（几何段还有未知 key），改用"key + 合法 tag + 值域"三重护栏。
+ */
+function findFloatField(
+  buf: Buffer,
+  from: number,
+  end: number,
+  key: number,
+  lo: number,
+  hi: number
+): number | null {
+  const stop = Math.min(end, from + 256);
+  for (let i = from; i + 5 <= stop; i++) {
+    if (buf[i] !== key || !plausibleTag(buf[i + 1])) continue;
+    const v = decFloat(buf, i + 1);
+    if (v >= lo && v <= hi) return v;
+  }
+  return null;
+}
+
+/**
+ * 解析节点几何/布局属性（见 NodeGeometry 注释的属性语义与局限）。
+ * @param type 节点的已解码类型（用于 RECTANGLE 的圆角定位）
+ */
+function parseNodeGeometry(
+  buf: Buffer,
+  geomPos: number,
+  end: number,
+  type: string | null
+): NodeGeometry {
+  const g: NodeGeometry = {
+    width: null,
+    height: null,
+    opacity: null,
+    cornerRadius: null,
+    x: 0,
+    y: 0,
+    positionSignResolved: false,
+  };
+
+  // width(0e) / height(0f)：尺寸在 [0.001, 50000] 之间
+  g.width = findFloatField(buf, geomPos, end, 0x0e, 0.001, 50000);
+  g.height = findFloatField(buf, geomPos, end, 0x0f, 0.001, 50000);
+  // opacity(0a)：仅当 !=1 时存在，值域 [0, 1]
+  g.opacity = findFloatField(buf, geomPos, end, 0x0a, 0, 1);
+
+  // x / y：定位 18 容器块「18 <sub...> 00」，sub01=x、sub02=y，各跟 4 字节紧凑浮点
+  const stop18 = Math.min(end, geomPos + 256);
+  for (let i = geomPos; i + 1 < stop18; i++) {
+    if (buf[i] !== 0x18) continue;
+    let j = i + 1;
+    while (j < end && buf[j] !== 0) {
+      const sub = buf[j];
+      if (sub === 0x01 && j + 5 <= end && plausibleTag(buf[j + 1])) {
+        g.x = decFloat(buf, j + 1);
+        j += 5;
+      } else if (sub === 0x02 && j + 5 <= end && plausibleTag(buf[j + 1])) {
+        g.y = decFloat(buf, j + 1);
+        j += 5;
+      } else {
+        j += 1;
+      }
+    }
+    break; // 已定位首个 18 块
+  }
+
+  // cornerRadius（仅 RECTANGLE）：首个 1c 类型块后接「01 04 + 4×紧凑浮点」
+  if (type === "RECTANGLE") {
+    const stop = Math.min(end, geomPos + 256);
+    for (let i = geomPos; i + 2 < stop; i++) {
+      if (buf[i] !== 0x1c || buf[i + 1] !== 0x03) continue;
+      const c1 = buf[i + 2];
+      const c2 = buf[i + 3];
+      if (c1 === 0x01 && c2 === 0x04 && i + 4 + 16 <= end) {
+        // 4 个角各为 4 字节紧凑浮点；任一 tag 不合理或值非法则整体判为无法解析
+        let bad = false;
+        const rs = [0, 1, 2, 3].map((k): number => {
+          const p = i + 4 + k * 4;
+          if (!plausibleTag(buf[p])) bad = true;
+          const v = decFloat(buf, p);
+          if (!Number.isFinite(v) || v < 0 || v > 9999) bad = true;
+          return v;
+        });
+        if (!bad) {
+          // 4 角一致给单值，否则 4 元数组
+          const allEq = rs.every((r) => Math.abs(r - rs[0]) < 0.001);
+          g.cornerRadius = allEq ? rs[0] : rs;
+        }
+      }
+      break;
+    }
+  }
+
+  return g;
+}
+
+/**
  * 从全量 /data 二进制中解析出以 pageId 为根的节点树。
  * 扫描所有 `01 <id>\0` 节点记录，依据 02=parent 构建父子链接，再以 pageId 为根收拢子树。
  */
@@ -183,13 +330,16 @@ export function parsePageTree(buf: Buffer, pageId: string): PageTree {
     if (parent === null && r.anchor && r.anchor === pageId) {
       parent = pageId; // 页面顶层节点
     }
+    const end = geomEnd.get(id) ?? buf.length;
+    const type = decodeNodeType(buf, r.geomPos, end);
     tnodes.set(id, {
       id,
       name: r.name,
       parent,
       typeRaw: r.typeRaw,
       anchor: r.anchor,
-      type: decodeNodeType(buf, r.geomPos, geomEnd.get(id) ?? buf.length),
+      type,
+      geometry: parseNodeGeometry(buf, r.geomPos, end, type),
     });
   }
 

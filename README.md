@@ -94,7 +94,8 @@ src/
 ## 待实现能力（Roadmap · 均基于网页接口自研）
 
 - [x] **图层/节点深度读取**：完整节点树已解码（id / 名称 / 类型 / 父子层级，`get_page_tree`，父/子与类型实测 100%）
-- [ ] **几何与布局属性**：节点位置（x/y）、尺寸、圆角、填充/描边、透明度、布局约束等
+- [ ] **几何与布局属性（部分完成）**：尺寸（width/height）、透明度（opacity）、圆角（cornerRadius，RECTANGLE）已在 `get_page_tree` 的 `geometry` 输出，实测与浏览器一致。
+  剩余难点：x/y 坐标当前只能解出**幅度值**（紧凑浮点为无符号编码，符号位不在格式内、父-子变换也无法恢复，`positionSignResolved` 恒为 `false`）；rotation/transform、fill(颜色)/stroke、布局约束(layout：flexMode/padding/itemSpacing) 未解码
 - [ ] **组件与样式资源**：读取文件级组件库、颜色/文字/效果样式
 - [ ] **变量（Variables）**：Design Tokens 的读取与引用关系
 - [ ] **图片/切图导出**：节点导出为 PNG/SVG/PDF，可交付到本地目录
