@@ -143,7 +143,8 @@ src/
 | mainAxisSizingMode | 30126 | 190 | 3023 | 99.37% |
 | crossAxisSizingMode | 29277 | 1039 | 3023 | 96.57% |
 
-偏差集中在**实例内部节点**（id 含 `/`，其 `1c 07` 块省略布局字段、继承母版，autoLayout 为 null，共 40225 个）与**绑定了设计令牌**的节点（几何段内 `2a {"tokens":...}` 覆盖了内联值）。padding/itemSpacing 的错判高度集中——各字段的 top1 错判都是**同一批 608 个节点**（itemSpacing `0→10`、paddingTop `6→1`、paddingRight `6→3`…），疑似该批节点的布局值由父级/母版继承或被令牌覆盖，尚未定位到判别依据。
+偏差集中在**实例内部节点**（id 含 `/`，其 `1c 07` 块省略布局字段、继承母版，autoLayout 为 null，共 40225 个）与**绑定了设计令牌**的节点（几何段内 `2a {"tokens":...}` 覆盖了内联值）。padding/itemSpacing 的错判高度集中——各字段的 top1 错判都是**同一批 608 个节点**（itemSpacing 二进制 `10`→真值 `0`、paddingTop 二进制 `1`→真值 `6`、paddingRight `3`→`6`…）。
+  > **608 节点覆盖来源已定位（2026-09，结论：无可靠二进制判据，不回填）**：这批节点全部是 **DatePicker 组件库实例**（INSTANCE，真值 `fm=VERTICAL`）。它们的**整个布局块**（flexMode/itemSpacing/padding/对齐/sizingMode）与浏览器真值全不一致（仅 cornerRadius=6 正确，对应 `borderRadius` 令牌），且**母版继承与令牌都无法解释**——母版（如 `0:16302`）布局块内容与实例相同而真值也是覆盖值；实例段内 `2a` 令牌仅含 `borderRadius`（不涉及 itemSpacing）。候选判据均失败：全部节点带 `25 02` 标记 + `2a` 令牌，但**正确节点中同样组合有 6288 个**（据此判据召回 608 时的精确率仅 ~9%）。结论：布局值由组件库主题在**客户端渲染层**覆盖，二进制内联的是组件**定义值**、浏览器生效的是**覆盖值**，以现有 `/data` 素材找不到可靠判别依据。按「宁可判空也不猜错」原则**不回填**，维持输出二进制内联值。
 - [ ] **组件与样式资源（部分完成）**：颜色样式（paint 样式）已破解并交付 `list_styles` 工具，实测 4/4 与浏览器 `getLocalPaintStyles()` 真值一致；文字样式 / 效果样式 / 组件库尚未实现。**如何继续**：见下节「接手指南 ②/③」。
   - paint 样式聚合记录格式：`01 <selfId>\0 02 <name>\0 03 61 <subtype>\0 [04 00] 05 01 00 00 06 01 07 <ukey>\0 08 ...`，按 `07` 后 ukey 前缀 `fileId+` 筛本文件定义；SOLID 样式 RGBA 走 paint 定义表（`buildPaintTable`）查询 selfId 拿到颜色。
   - collectionId 默认 `M:1`、collectionName 默认 `集合`：二进制中**没有独立 collection 表**（搜 `fileId+M:` 0 命中），疑似客户端对每个文件默认构造一个 collection。
@@ -192,7 +193,7 @@ src/
 ### ④ 组件列表（Components）—— 部分完成（modern 已识别 COMPONENT）
 - **目标字段**：文件组件库里的 `COMPONENT` 定义节点（id、名称、所属 frame）、`INSTANCE` 与 `COMPONENT` 的引用关系、`COMPONENT_SET`。
 - **已完成（modern 格式）**：`decodeModernContainer` 已能判出 `COMPONENT`（几何段含自引用 ukey `<fileId>+<selfId>`）与 `INSTANCE`（`1a <componentId>` 指向已识别组件，两遍解码）。已知取舍：COMPONENT_SET 折叠进 COMPONENT（48 例错判；最优候选判别式精确率仅 79%，故不引入猜测）。
-- **仍缺（legacy 格式）**：`decodeNodeType` 的 legacy `1c 07` 分支**仍未识别 COMPONENT**（只有 `06`=INSTANCE、`03/09/0a`=FRAME、`01 00 09/0a`=GROUP、`01 00 02`=BOOLEAN_OPERATION），带子节点的组件会被归为 `FRAME`。火车票页面真值恰好不含 COMPONENT，所以 828/829 的「0 错判」**并未覆盖**这一点。
+- **已完成（legacy 格式）**：legacy 文件的 COMPONENT 已补齐识别——legacy 文件中可能嵌入 modern 容器块（组件库/混合格式），`b===0x07 && c===0x01 && hasSelfUkey` 判为 COMPONENT（复用 modern 已验证的零假阳性判据，ukey 机制与容器编码无关）。实测火车票 3 个组件根下共识别出 **87 个 COMPONENT**（如「组件/Checkbox」、星级、状态等），且 PAGE 树回归 828/828 保持、0 错判；误伤面为零（仅当首个 `1c` 是 `1c 07 01` 容器块才检查 ukey，`1c 03` 等叶子不受影响）。
 - **从何入手**：
   1. `evaluate_script` 调 `getComponentListVal()` 导出组件 id 真值（含本地/外部标记），**同时把该文件 `/data` 整份存盘**。
   2. **首选验证 `hasSelfUkey` 是否格式无关**：modern 下「几何段含 `+<selfId>\0`」是 COMPONENT 的精确判据（零假阳性），而 ukey 机制与容器编码无关，legacy 很可能同构。做法：对 legacy 火车票统计「几何段含自引用 ukey」的节点，看它们当前被判成什么——若大量落在 `FRAME`，即命中上述盲区。

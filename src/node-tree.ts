@@ -402,6 +402,11 @@ function decodeNodeType(
     if (leaf) return leaf;
     if (b === 0x07 && format === "legacy") {
       const c = buf[p + 2];
+      // legacy 文件中可能嵌入 modern 容器块（组件库/混合格式）：`1c 07 01 0?`。
+      // modern 下「容器块 + 自引用 ukey」是 COMPONENT 的精确判据（零假阳性，见 decodeModernContainer），
+      // ukey 机制与容器编码无关，故在此复用同一判据补上 legacy 分支缺失的 COMPONENT 识别。
+      // 注意：仅当 c===0x01（modern 容器块）才检查 ukey，避免把 `1c 03`(RECTANGLE) 等叶子误判成 COMPONENT。
+      if (c === 0x01 && hasSelfUkey(buf, geomPos, end, selfId)) return "COMPONENT";
       if (c === 0x06) return "INSTANCE";
       if (c === 0x03 || c === 0x09 || c === 0x0a) return "FRAME";
       if (c === 0x01 && buf[p + 3] === 0x00) {
