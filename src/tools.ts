@@ -149,17 +149,20 @@ export function buildTools(): ToolDef[] {
         "fills/strokes（RGBA 纯色，经 paint 定义表解析）、strokeWeight（描边宽度，实测 63/63 与浏览器一致）、" +
         "strokeAlign（描边对齐，实测 776/776 与浏览器一致）、constraints（布局约束 horizontal/vertical，" +
         "实测 546/548 与浏览器一致）、autoLayout（自动布局：flexMode/itemSpacing/padding 四边/" +
-        "mainAxisAlignItems/crossAxisAlignItems/mainAxisSizingMode/crossAxisSizingMode；flexMode 实测 " +
-        "33024/33061 与浏览器一致，sizingMode 主轴 ≈99.3%、交叉轴 ≈96.7%，仅实例内部节点为 null）。" +
+        "mainAxisAlignItems/crossAxisAlignItems/mainAxisSizingMode/crossAxisSizingMode；实测（Ant Design 5.0，" +
+        "73620 条布局真值）flexMode 33302/33339 = 99.89%、主轴对齐 100%、itemSpacing 与 padding ≈98%、" +
+        "主轴 sizingMode 99.37%、交叉轴 sizingMode 96.57%；实例内部节点 autoLayout 为 null，继承母版）。" +
         "颜色仅保证 SOLID 填料（kind='SOLID'）；IMAGE/GRADIENT/UNKNOWN 物件 color 为 null。" +
-        "参数 file 传文件 ID 或完整 URL；page 传具体页（可沿用 list_pages 返回的页面 id，或 URL 中 page_id）。",
+        "参数 file 传文件 ID 或完整 URL；page 可省略（自动采用 URL 中的 page_id / layer_id，" +
+        "或用 list_pages 返回的页面 id）。",
       params: {
         file: z.string().describe("MasterGo 文件 ID 或完整文件 URL（必填）"),
         page: z
           .string()
+          .optional()
           .describe(
-            "目标页面的节点 id（必填，形如 10371:87078）。" +
-              "可从 list_pages 返回的页面 id 或浏览器 URL 的 page_id 参数获得"
+            "目标页面的节点 id（形如 10371:87078）。**可省略**——省略时自动采用 file URL 中的 " +
+              "page_id / layer_id；若 URL 也未带，请先用 list_pages 取页面 id"
           ),
         depth: z
           .number()

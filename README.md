@@ -23,7 +23,12 @@ npm run build
 
 | 环境变量 | 说明 |
 | --- | --- |
-| `MG_COOKIE="gfsessionid=xxx; ..."` | 浏览器 Cookie，网页 API 认证的唯一方式 |
+| `MG_COOKIE="gfsessionid=xxx; ..."` | 浏览器 Cookie。访问**私有文件**的认证方式；**公开文件（`isPublic`）无需任何认证** |
+| `MG_BASE_URL` | 可选。API 基础地址，默认 `https://mastergo.com`（私有化部署 / 走代理时使用） |
+| `MG_MCP_TOKEN` | 可选，仅向后兼容保留。旧版官方 `/mcp/*` 网关使用；现网页 API 自研模式下**无需配置**，若配置会作为 `X-MG-UserAccessToken` 请求头附加发送 |
+
+命令行参数（优先级高于环境变量）：`--cookie <值>`、`--url <值>`、`--token <值>`。
+完整优先级：**命令行参数 → 环境变量 → 根目录 `.env.local` / `.env`**（`.env` 不覆盖已存在的环境变量）。
 
 Cookie 获取：登录 mastergo.com 后，打开浏览器开发者工具 → Network → 任意请求的 Request Headers 中复制 `Cookie` 整段值。
 
@@ -62,7 +67,7 @@ npx tsx src/index.ts --cookie "gfsessionid=..." --url https://mastergo.com
 | `get_file_meta` | 文件元信息：名称、团队、项目、fileKey、权限、负责人 | `/api/v1/documents/{id}` |
 | `list_pages` | 文件内全部页面列表（页面 ID + 页面名） | `/data/{fileKey}` 二进制索引 |
 | `get_file_nodes` | 全量节点索引：全部页面 + 所有名节点的 id/名称（支持按名搜索、限量） | `/data/{fileKey}` 二进制索引（全量下载） |
-| `get_page_tree` | 指定页面节点树：id、名称、类型、父节点 id、父子层级（支持限深展开） | `/data/{fileKey}` 二进制节点树解码 |
+| `get_page_tree` | 指定页面节点树：id、名称、类型、父节点 id、父子层级（支持限深展开）。`page` 可省略，自动取 URL 的 `page_id` | `/data/{fileKey}` 二进制节点树解码 |
 | `list_styles` | 文件本地 paint 样式（颜色样式）：id、名称、collection、ukey、RGBA（按 ukey 筛本文件定义） | `/data/{fileKey}` 二进制 paint 样式聚合记录 |
 
 ### 推荐工作流
@@ -79,10 +84,19 @@ npx tsx src/index.ts --cookie "gfsessionid=..." --url https://mastergo.com
 > - **modern**（Ant Design 5.0 等较新文件）：容器类型块统一为 `1c 07 01 0?`，目前**只解出实测精确的部分**——GROUP（`1c 07 01 00`，覆盖真值 784/790 且零假阳性）、COMPONENT（几何段含组件 ukey `<fileId>+<selfId>`）、INSTANCE（`1a` 指向已识别组件）；**FRAME 等其余容器一律返回 `null`，宁可判空也不猜错**。
 >   实测（Ant Design 5.0，73620 条容器真值，逐根走真实 `parsePageTree`）：改造前 **命中 0 / 错判 740（其中 GROUP→BOOLEAN_OPERATION 466）**，改造后 **命中 6140 / 错判 303**。剩余错判为两处**已知局限**，均因判别式精确率不足而未引入猜测：① 255 条「容器→LINE/RECTANGLE」——其几何段首个 `1c` 恰是叶子标记（段内也存在容器块，但让容器块压过叶子标记只有 55% 精确率）；② 48 条 COMPONENT_SET→COMPONENT——实测仅 24.9% 的 COMPONENT_SET 带 ukey，最优候选判别式精确率仅 79%。
 > - 叶子类型（TEXT/RECTANGLE/ELLIPSE/LINE/PEN/SLICE）两套格式共用同一判别，不受影响。
+>
+> **`/data` 接口的两个实测特性（做回归时务必注意）**：
+> 1. **忽略 `Range`**：带 `Range: bytes=0-8388607` 仍返回 `HTTP 200` + 完整 `content-length`（无 `content-range` / `accept-ranges`），所以 `list_pages` 实际也会下载整个文件。客户端据此在「未请求分段」或「请求了分段但返回 200（而非 206）」时按**全量缓存**，避免随后的 `get_page_tree` 重复下载同一个数十 MB 文件（实测省下约 2s 下载）。
+> 2. **响应不可字节复现**：同一未变动文件（`updateAt` 三次查询一致）连续下载会得到**不同 md5**，长度相同但可有数千万字节差异（疑似记录序列化顺序随机）。因此**回归对比必须按结构（节点 id / 类型 / 层级），不要用 md5 或整文件 diff**。已验证解析器对此稳健：两份字节差异达 4353 万字节的新下载，均解析出同样的 **828/829** 类型结果、且逐节点类型完全一致（919 相同 / 0 不同）。
 
 ## 权限说明（重要）
 
-- 文件元信息、页面列表：**仅需浏览器 Cookie，无需付费席位**（已实测验证：`GET /api/v1/documents/{fileId}` 与 `/data/{fileKey}` 均可用 Cookie 访问）；
+- **公开文件（`isPublic: true`）无需任何认证**：实测不带 Cookie、甚至带无效 Cookie，`GET /api/v1/documents/{fileId}` 与 `/data/{fileKey}` 均返回 `200` 与完整数据。因此客户端**不做 Cookie 前置校验**（前置拦截会让公开文件的 `list_pages` / `get_page_tree` 误失败）；
+- **私有文件必须带浏览器 Cookie**，但无需付费席位。实测无 Cookie / Cookie 失效时服务端返回 `403`，响应体形态为：
+  - `/data/{fileKey}` → `{"code":"AccessDenied","message":""}`
+  - `/api/v1/documents/{fileId}` → `{"code":"NotAllowAnonymousAccess","meta":{"msg":"document not public"}}`
+  - fileKey 不存在 → `{"code":"AccessDenied","message":""}`
+  客户端统一归一化为可操作的中文提示（`mastergo.ts` 的 `ERROR_HINTS` + `normalizeErrorBody`）。注意 `/data` 用 `responseType: "arraybuffer"`，错误体是二进制，**必须先解码成 JSON** 才能读到 `code`，否则会得到空消息；
 - 本项目**不使用**官方 `/mcp/*` 网关，因此**不需要**个人访问令牌、也不受「是否开通 Magic MCP / 研发席位」的限制。
 
 ## 项目结构
@@ -108,7 +122,19 @@ src/
 - [x] **strokeWeight（描边宽度）**：描边宽度已破解。几何段内、13 引用块之前，key=`0x10`：`10 00`→0（隐藏描边）、`10 <4字节紧凑浮点>`→权重值、无该字段→默认 1。实测 63/63 与浏览器真值一致。
 - [x] **strokeAlign（描边对齐）**：字段 `13`：`01`→CENTER、`02`→INSIDE、`03`→OUTSIDE，缺省 CENTER。实测 776/776 与浏览器真值一致。
 - [x] **constraints（布局约束）**：字段 `0b`=vertical、`0c`=horizontal：`01`→END、`03`→CENTER、`04`→SCALE，字段缺省→START；两字段仅在该轴非默认值时出现（如 `0b 03 0c 03` 即垂直/水平皆 CENTER）。实测垂直 546/548、水平 546/548 与浏览器真值一致（2 例偏差为实例内部节点继承母版约束）。
-- [x] **autoLayout 自动布局（flexMode/padding/itemSpacing/对齐/sizingMode）**：已破解并落地到 `geometry.autoLayout`。字段位于几何段内 `1c 07` 类型块（FRAME/INSTANCE/GROUP/BOOLEAN_OPERATION）中：`08 <v>`→flexMode（00=NONE/01=HORIZONTAL/02=VERTICAL）、`09 <紧凑浮点|00>`→itemSpacing、`0a 01<pt> 02<pr> 03<pb> 04<pl> 00`→padding（每边为 0 以单字节 `00` 存）、`0d <ma> 0e <ca>`→主轴/交叉轴对齐（0=FLEX_START/1=FLEX_END/2=CENTER/3=SPACING_BETWEEN）、锚点 `1e 00 [1f <0|1>] [20 <紧凑浮点|00>] 21 <ms> [22 <xs>]` 内 `21`→主轴 sizingMode、`22`→交叉轴 sizingMode（0=FIXED/1=AUTO，`22` 缺省时按 AUTO 处理）。实测（Ant Design 5.0，73620 条布局真值）：flexMode 33302 命中 / 37 错；itemSpacing 32664/658；padding 32478/676；主轴对齐 33081/258、交叉轴 33014/325；主轴 sizingMode ≈99.3%、交叉轴 sizingMode ≈96.7%。偏差集中在**实例内部节点**（id 含 `/`，其 `1c 07` 块省略布局字段、继承母版，autoLayout 为 null，共 40225 个）与**绑定了设计令牌**的节点（几何段内 `2a {"tokens":...}` 覆盖了内联值）。
+- [x] **autoLayout 自动布局（flexMode/padding/itemSpacing/对齐/sizingMode）**：已破解并落地到 `geometry.autoLayout`。字段位于几何段内 `1c 07` 类型块（FRAME/INSTANCE/GROUP/BOOLEAN_OPERATION）中：`08 <v>`→flexMode（00=NONE/01=HORIZONTAL/02=VERTICAL）、`09 <紧凑浮点|00>`→itemSpacing、`0a 01<pt> 02<pr> 03<pb> 04<pl> 00`→padding（每边为 0 以单字节 `00` 存）、`0d <ma> 0e <ca>`→主轴/交叉轴对齐（0=FLEX_START/1=FLEX_END/2=CENTER/3=SPACING_BETWEEN）、锚点 `1e 00 [1f <0|1>] [20 <紧凑浮点|00>] 21 <ms> [22 <xs>]` 内 `21`→主轴 sizingMode、`22`→交叉轴 sizingMode（0=FIXED/1=AUTO，`22` 缺省时按 AUTO 处理）。实测（Ant Design 5.0，73620 条布局真值，逐根走真实 `parsePageTree`；另有 40225 个实例内部节点 `autoLayout` 为 null，不计入下表分母）：
+
+| 字段 | 命中 | 错判 | 判空 | 命中率（命中/(命中+错判)） |
+| --- | --- | --- | --- | --- |
+| flexMode | 33302 | 37 | 0 | 99.89% |
+| itemSpacing | 32664 | 658 | 17 | 98.03% |
+| padding 上/右/下/左 | 32507 / 32525 / 32498 / 32527 | 647 / 629 / 656 / 627 | 185 | ≈98.0% |
+| mainAxisAlignItems | 33081 | 0 | 258 | 100.00% |
+| crossAxisAlignItems | 33014 | 67 | 258 | 99.80% |
+| mainAxisSizingMode | 30126 | 190 | 3023 | 99.37% |
+| crossAxisSizingMode | 29277 | 1039 | 3023 | 96.57% |
+
+偏差集中在**实例内部节点**（id 含 `/`，其 `1c 07` 块省略布局字段、继承母版，autoLayout 为 null，共 40225 个）与**绑定了设计令牌**的节点（几何段内 `2a {"tokens":...}` 覆盖了内联值）。padding/itemSpacing 的错判高度集中——各字段的 top1 错判都是**同一批 608 个节点**（itemSpacing `0→10`、paddingTop `6→1`、paddingRight `6→3`…），疑似该批节点的布局值由父级/母版继承或被令牌覆盖，尚未定位到判别依据。
 - [ ] **组件与样式资源（部分完成）**：颜色样式（paint 样式）已破解并交付 `list_styles` 工具，实测 4/4 与浏览器 `getLocalPaintStyles()` 真值一致；文字样式 / 效果样式 / 组件库尚未实现。**如何继续**：见下节「接手指南 ②/③」。
   - paint 样式聚合记录格式：`01 <selfId>\0 02 <name>\0 03 61 <subtype>\0 [04 00] 05 01 00 00 06 01 07 <ukey>\0 08 ...`，按 `07` 后 ukey 前缀 `fileId+` 筛本文件定义；SOLID 样式 RGBA 走 paint 定义表（`buildPaintTable`）查询 selfId 拿到颜色。
   - collectionId 默认 `M:1`、collectionName 默认 `集合`：二进制中**没有独立 collection 表**（搜 `fileId+M:` 0 命中），疑似客户端对每个文件默认构造一个 collection。
@@ -116,7 +142,7 @@ src/
 - [ ] **变量（Variables）**：Design Tokens 的读取与引用关系。**如何继续**：见下节「接手指南 ⑤」。
 - [ ] **图片/切图导出**：节点导出为 PNG/SVG/PDF，可交付到本地目录
 - [ ] **设计稿差异对比**：两份文件/版本间节点 diff
-- [ ] **Cookie 过期检测**：失效检测与登录引导提示
+- [x] **Cookie 过期检测 / 错误归一化**：`MasterGoError` + `toMasterGoError` 覆盖全部请求路径（含 `/data` 的 `arraybuffer` 错误体解码）。实测 `403 AccessDenied`（Cookie 失效 / 无权限）、`403 NotAllowAnonymousAccess`（文件未公开）、`NoDocumentPermission`、`NotFoundDocument`、`10003` 均给出可操作的中文提示；此前 `/data` 绕过归一化，失效时抛出**空消息**的原始 axios 错误，现已修复。
 - [ ] **打包发布**：`npm pack` / 单文件二进制（esbuild），免 npx tsx 依赖
 
 ## 未解析内容 · 接手指南
@@ -138,7 +164,7 @@ src/
   - `0a 01<pt> 02<pr> 03<pb> 04<pl> 00` → padding（每边为 0 时以单字节 `00` 存）
   - `0d <ma> 0e <ca>` → main/crossAxisAlignItems：`0`=FLEX_START、`1`=FLEX_END、`2`=CENTER、`3`=SPACING_BETWEEN
   - 锚点 `1e 00 [1f <0|1>] [20 <紧凑浮点|00>] 21 <ms> [22 <xs>]` → `21`=mainAxisSizingMode、`22`=crossAxisSizingMode：`0`=FIXED、`1`=AUTO（`1d 01`/`1f <v>`/`20 <float|00>` 为可选前缀；`21` 恒存在，`22` 常缺省、缺省按 AUTO 处理）
-- **真值与命中率**：以 Ant Design 5.0 稿（fileKey `eb0ea904-...`，真值 `ad_truth.json` 73620 条、二进制 `ad_src.bin` 105.8MB）对照，见 Roadmap 中 autoLayout 条目。
+- **真值与命中率**：以 Ant Design 5.0 稿（fileKey `eb0ea904-...`，真值 `ad_truth.json` 73620 条、二进制 `ad_src.bin` 105.8MB）对照，见 Roadmap 中 autoLayout 条目。**注意复现方式**：真值需按「所属根节点」分组、对每个根调 `parsePageTree` 后取节点（全量 473 个根约 35 分钟），单遍扫描无法覆盖实例内部节点。
 - **已知局限**：实例内部节点（id 含 `/`）的 `1c 07` 块省略布局字段，`autoLayout` 为 null（继承母版）。sizingMode 残差（主轴 ≈0.7%、交叉轴 ≈3%）集中在含 `25 02` 标记的节点——疑似尺寸由父/母版继承或覆盖（layoutGrow/STRETCH），实测其真值并非都能由内联值或父节点继承还原（探针 `probe_sz18`）。曾试过在 `25 02`/`2a` 上抑制（置 null），但这只是把「猜错」换成「漏报」，原始错误数反而上升，故未采用。
 
 ### ② 文字样式表（Text Styles）

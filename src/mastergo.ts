@@ -21,25 +21,80 @@ export class MasterGoError extends Error {
   }
 }
 
-/** 提取 MasterGo 接口错误消息（code 10003 权限不足 / 10016 缺令牌等） */
+/**
+ * MasterGo 错误码 → 可操作的中文提示。
+ * 网页接口的 code 既有数字（如 10003），也有字符串（如 AccessDenied），实测：
+ *   /data 私有文件无 Cookie → 403 {"code":"AccessDenied","message":""}
+ *   /api/v1/documents 私有文件无 Cookie → 403 {"code":"NotAllowAnonymousAccess","meta":{"msg":"document not public"}}
+ *   fileKey 不存在 → 403 {"code":"AccessDenied","message":""}
+ */
+const ERROR_HINTS: Record<string, string> = {
+  "10003": "MasterGo 权限不足（10003）：请确认账号对目标文件有访问权限，且已开通对应的团队/研发席位。",
+  "10016": "MasterGo 缺少访问令牌（10016）：请在 .env 中配置 MG_COOKIE。",
+  AccessDenied:
+    "MasterGo 拒绝访问（AccessDenied）：Cookie 可能已失效，或当前账号对该文件无权限。" +
+    "请从浏览器重新复制 Cookie 更新 .env 中的 MG_COOKIE（注意：非公开文件必须携带有效 Cookie）。",
+  NotAllowAnonymousAccess:
+    "该文件未公开（NotAllowAnonymousAccess）：需要有效的登录 Cookie。请在 .env 中配置 MG_COOKIE。",
+  NoDocumentPermission: "当前账号对该文件无权限（NoDocumentPermission）：请确认文件是否已共享给该账号。",
+  NotFoundDocument: "MasterGo 未找到该文件（NotFoundDocument）：请确认 fileId 是否正确、文件是否已被删除。",
+};
+
+/**
+ * 把错误响应体统一成对象。
+ * 关键：/data 请求用 responseType="arraybuffer"，出错时拿到的是 ArrayBuffer/Buffer 而非
+ * 已解析的 JSON，直接读 body.code 会得到 undefined，必须先把二进制解码成 JSON。
+ */
+function normalizeErrorBody(raw: unknown): any {
+  if (raw == null) return undefined;
+  const isBinary =
+    Buffer.isBuffer(raw) || raw instanceof ArrayBuffer || ArrayBuffer.isView(raw);
+  if (!isBinary) {
+    if (typeof raw === "string") {
+      try {
+        return JSON.parse(raw);
+      } catch {
+        return undefined;
+      }
+    }
+    return typeof raw === "object" ? raw : undefined;
+  }
+  try {
+    const text = Buffer.isBuffer(raw)
+      ? raw.toString("utf8")
+      : raw instanceof ArrayBuffer
+        ? Buffer.from(raw).toString("utf8")
+        : Buffer.from((raw as ArrayBufferView).buffer, (raw as ArrayBufferView).byteOffset, (raw as ArrayBufferView).byteLength).toString("utf8");
+    return JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+}
+
+/** 提取 MasterGo 接口错误消息（code 10003 权限不足 / AccessDenied Cookie 失效等） */
 function toMasterGoError(err: unknown): MasterGoError {
   if (err instanceof AxiosError) {
-    const body: any = err.response?.data;
-    const msg =
-      typeof body?.message === "string"
-        ? body.message
-        : body?.code
-          ? `MasterGo 错误码 ${body.code}`
-          : err.message;
-    const e = new MasterGoError(msg, {
-      code: String(body?.code ?? ""),
-      status: err.response?.status,
-    });
-    if (e.code === "10003") {
-      e.message = "MasterGo 权限不足（10003）：请确认账号对目标文件有访问权限，" +
-        "且已开通对应的团队/研发席位。";
+    const body = normalizeErrorBody(err.response?.data);
+    const status = err.response?.status;
+    const code = body?.code != null ? String(body.code) : "";
+
+    // 优先级：已知错误码的可操作提示 > 接口原始 message > meta.msg > 状态码兜底 > 原始错误
+    let msg = ERROR_HINTS[code];
+    if (!msg && typeof body?.message === "string" && body.message.trim()) {
+      msg = body.message.trim();
     }
-    return e;
+    if (!msg && typeof body?.meta?.msg === "string" && body.meta.msg.trim()) {
+      msg = body.meta.msg.trim();
+    }
+    if (!msg && (status === 401 || status === 403)) {
+      msg =
+        `MasterGo 鉴权失败（HTTP ${status}）：Cookie 可能已失效或权限不足，` +
+        "请从浏览器重新复制 Cookie 更新 .env 中的 MG_COOKIE。";
+    }
+    if (!msg && code) msg = `MasterGo 错误码 ${code}`;
+    if (!msg) msg = err.message;
+
+    return new MasterGoError(msg, { code, status });
   }
   if (err instanceof Error) return new MasterGoError(err.message);
   return new MasterGoError(String(err));
@@ -136,37 +191,59 @@ export class MasterGoClient {
   private static readonly FULL_DATA_MAX = 2;
   private static readonly FULL_DATA_TTL_MS = 5 * 60 * 1000;
 
-  /** 拉取 /data/{fileKey} 私有二进制字节。默认全量下载；传 maxBytes 时用 Range 只取前段。 */
+  /**
+   * 拉取 /data/{fileKey} 私有二进制字节。默认全量下载；传 maxBytes 时尝试用 Range 只取前段。
+   *
+   * 注意（2026-09 实测）：MasterGo 目前**忽略 Range**——带 `Range: bytes=0-8388607` 仍返回
+   * HTTP 200 + 完整 content-length（无 content-range / accept-ranges）。因此 maxBytes 实际
+   * 拿到的就是完整文件，此时按全量缓存，避免后续 get_page_tree 再下载一遍同一个数十 MB 文件。
+   * 同时，/data 响应**不可字节复现**（同一未变动文件连续两次下载可有大面积字节差异，长度相同），
+   * 回归对比必须按结构（节点/类型）而非 md5。
+   */
   private async fetchData(fileKey: string, maxBytes?: number): Promise<Buffer> {
-    if (!this.cfg.cookie && !this.cfg.token) {
-      throw new MasterGoError("读取 /data 网页二进制需要浏览器 Cookie（MG_COOKIE）");
-    }
+    // 不在此处前置校验 Cookie：实测 isPublic 文件无需任何认证即可读取（无 Cookie 亦返回 200），
+    // 前置拦截会让公开文件的 list_pages / get_page_tree 误失败。私有文件由服务端返回 403，
+    // 再由 toMasterGoError 归一化成可操作的中文提示。
     const cacheKey = `full:${fileKey}`;
-    if (!maxBytes) {
-      const hit = this.fullDataCache.get(cacheKey);
-      if (hit && hit.expiresAt > Date.now()) return hit.buf;
-    }
+    const hit = this.fullDataCache.get(cacheKey);
+    if (hit && hit.expiresAt > Date.now()) return hit.buf;
+
     const headers: Record<string, string> = { ...this.headers() };
     if (maxBytes) headers["Range"] = `bytes=0-${maxBytes - 1}`;
-    const res = await this.client.get(`${this.cfg.baseUrl}/data/${fileKey}`, {
-      params: { wv: "v3.2.1" },
-      headers,
-      responseType: "arraybuffer",
-    });
+    let res;
+    try {
+      res = await this.client.get(`${this.cfg.baseUrl}/data/${fileKey}`, {
+        params: { wv: "v3.2.1" },
+        headers,
+        responseType: "arraybuffer",
+      });
+    } catch (err) {
+      // 必须归一化：/data 的鉴权失败（403 AccessDenied）否则会抛出无提示的原始 axios 错误
+      throw toMasterGoError(err);
+    }
     const buf = Buffer.from(res.data as ArrayBuffer);
-    if (!maxBytes) {
+
+    // 服务端返回 206 才是真的部分内容，此时不可当作全量缓存；
+    // 未请求分段、或请求了分段但返回 200（Range 被忽略）都说明拿到的是完整文件。
+    const gotFullFile = !maxBytes || res.status !== 206;
+    if (gotFullFile) {
       if (this.fullDataCache.size >= MasterGoClient.FULL_DATA_MAX) {
         // 淘汰最旧的
         const oldest = this.fullDataCache.keys().next().value;
         if (oldest !== undefined) this.fullDataCache.delete(oldest);
       }
-      this.fullDataCache.set(cacheKey, { buf, expiresAt: Date.now() + MasterGoClient.FULL_DATA_TTL_MS });
+      this.fullDataCache.set(cacheKey, {
+        buf,
+        expiresAt: Date.now() + MasterGoClient.FULL_DATA_TTL_MS,
+      });
     }
     return buf;
   }
 
   /**
-   * 文件页面列表：GET /data/{fileKey}（部分下载，前 8MB 已覆盖文件头部的页面索引块）。
+   * 文件页面列表：GET /data/{fileKey}。
+   * 传 8MB 上限是想只取文件头部的页面索引块，但实测服务端**忽略 Range**（返回 200 + 全量），
+   * 所以实际仍会下载整个文件——不过该缓冲区会按全量缓存，后续 get_page_tree 直接复用。
    */
   async getFilePageList(fileKey: string): Promise<Array<{ id: string; name: string }>> {
     const { parsePageBlocks } = await import("./page-index.js");
