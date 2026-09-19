@@ -34,9 +34,30 @@
  *     4 角一致则输出数值，否则输出 [r1,r2,r3,r4]）
  *   - strokeWeight：描边宽度（字段 10，位于 13 引用块之前；`10 00`=0 隐藏描边、
  *     4 字节紧凑浮点为权重、无该字段默认 1。实测 63/63 与浏览器真值一致）
+ *   - strokeAlign：描边对齐（字段 13：`01`=CENTER、`02`=INSIDE、`03`=OUTSIDE，
+ *     缺省 CENTER。实测 770/770 与浏览器真值一致）
+ *   - constraints：布局约束（字段 0b=vertical、0c=horizontal：`01`=END、`03`=CENTER、
+ *     `04`=SCALE，缺省 START。实测垂直 546/548、水平 546/548 与浏览器真值一致）
+ *
+ *   - 自动布局 autoLayout（2026-09 破解）：字段位于几何段内的 `1c 07` 类型块
+ *     （FRAME/INSTANCE/GROUP/BOOLEAN_OPERATION）中，键号与几何段外层复用但作用域独立：
+ *       `08 <v>`                              flexMode：00=NONE、01=HORIZONTAL、02=VERTICAL
+ *       `09 <紧凑浮点 | 00>`                  itemSpacing（`09 00`=0）
+ *       `0a 01<pt> 02<pr> 03<pb> 04<pl> 00`   padding（每边为 0 时以单字节 00 存）
+ *       `0d <ma> 0e <ca>`                     主轴/交叉轴对齐：
+ *                                             0=FLEX_START、1=FLEX_END、2=CENTER、3=SPACING_BETWEEN
+ *       `1e 00 [1f <0|1>] [20 <紧凑浮点|00>] 21 <ms> [22 <xs>]`
+ *                                             main/crossAxisSizingMode：0=FIXED、1=AUTO
+ *     实测（Ant Design 5.0，33061 个含布局块节点）：flexMode 33024 命中 / 仅 37 错；
+ *     sizingMode 主轴 ≈99.3%、交叉轴 ≈96.7% 命中。
  *
  * 已知局限：
- *   - 布局约束(layout：flexMode/padding/itemSpacing) 未解码，留待后续。
+ *   - autoLayout 的 itemSpacing/padding 约 2% 偏差，集中在绑定了设计令牌的实例节点
+ *     （几何段内 `2a` 令牌 blob 在别处覆盖了二进制内联值）。
+ *   - 实例内部节点（id 含 `/`）的 `1c 07` 块省略上述布局字段，autoLayout 为 null（继承母版）。
+ *   - sizingMode 的残差（主轴约 0.7%、交叉轴约 3%）集中在含 `25 02` 标记的节点：该标记疑似
+ *     「尺寸由父级/母版覆盖（如 layoutGrow/STRETCH）」，此时内联 21/22 与生效真值不一致。
+ *   - constraints 在实例内部节点上取默认值，与浏览器继承自母版的真值存在少量偏差。
  *
  * 坐标符号已破解（2026-09，178/178 x 与 177/177 y 对照浏览器 API 真值一致）：
  *   18 块内 x/y 使用**带符号**紧凑浮点（decFloatSigned），符号位是 24 位小端尾数
@@ -87,6 +108,45 @@ export interface NodePaint {
   color: NodeColor | null;
 }
 
+/**
+ * 自动布局（Auto Layout）属性，2026-09 破解，实测与浏览器真值高度一致。
+ *
+ * 字段位于几何段内的 `1c 07` 类型块（FRAME/INSTANCE/GROUP/BOOLEAN_OPERATION）中，
+ * 键号与几何段外层复用但作用域独立：
+ *   - `08 <v>`                            flexMode：00=NONE、01=HORIZONTAL、02=VERTICAL
+ *   - `09 <紧凑浮点 | 00>`                itemSpacing（主轴间距；`09 00`=0）
+ *   - `0a 01<pt> 02<pr> 03<pb> 04<pl> 00` padding（四边内边距；每边为 0 以单字节 00 存）
+ *   - `0d <ma> 0e <ca>`                   main/crossAxisAlignItems：
+ *                                         0=FLEX_START、1=FLEX_END、2=CENTER、3=SPACING_BETWEEN
+ *   - `1e 00 [1f <0|1>] [20 <紧凑浮点|00>] 21 <ms> [22 <xs>]`
+ *                                         main/crossAxisSizingMode：0=FIXED、1=AUTO
+ *                                         （21 为主轴恒存在；22 为交叉轴，缺省时按 AUTO 处理）
+ *
+ * 实例内部节点（id 含 `/`）的 `1c 07` 块省略上述字段（继承母版），此时 autoLayout 为 null。
+ */
+export interface NodeAutoLayout {
+  /** 布局方向（08）：NONE / HORIZONTAL / VERTICAL */
+  flexMode: "NONE" | "HORIZONTAL" | "VERTICAL";
+  /** 主轴间距（09；`09 00` 表示 0） */
+  itemSpacing: number | null;
+  /** 上内边距（0a 子 01） */
+  paddingTop: number | null;
+  /** 右内边距（0a 子 02） */
+  paddingRight: number | null;
+  /** 下内边距（0a 子 03） */
+  paddingBottom: number | null;
+  /** 左内边距（0a 子 04） */
+  paddingLeft: number | null;
+  /** 主轴对齐（0d）：FLEX_START / FLEX_END / CENTER / SPACING_BETWEEN */
+  mainAxisAlignItems: string | null;
+  /** 交叉轴对齐（0e），枚举同主轴 */
+  crossAxisAlignItems: string | null;
+  /** 主轴尺寸模式（21）：AUTO / FIXED（0=FIXED、1=AUTO）；无 21 时为 null */
+  mainAxisSizingMode: "AUTO" | "FIXED" | null;
+  /** 交叉轴尺寸模式（22），枚举同主轴；22 缺省时按 AUTO 处理（实测缺省节点约 95% 真值为 AUTO） */
+  crossAxisSizingMode: "AUTO" | "FIXED" | null;
+}
+
 export interface NodeGeometry {
   /** 节点包围盒宽度（无符号紧凑浮点解码，可靠） */
   width: number | null;
@@ -112,6 +172,12 @@ export interface NodeGeometry {
   strokes: NodePaint[];
   /** 描边宽度（紧凑浮点；未解码时为 null） */
   strokeWeight: number | null;
+  /** 描边对齐（字段 13：01=CENTER、02=INSIDE、03=OUTSIDE；缺省 CENTER） */
+  strokeAlign: "CENTER" | "INSIDE" | "OUTSIDE" | null;
+  /** 布局约束（字段 0b=vertical、0c=horizontal：01=END、03=CENTER、04=SCALE；缺省 START） */
+  constraints: { horizontal: string; vertical: string } | null;
+  /** 自动布局属性（FRAME/INSTANCE/GROUP 等；无布局块时为 null） */
+  autoLayout: NodeAutoLayout | null;
 }
 
 export interface TreeNode {
@@ -364,6 +430,144 @@ function findFloatField(
   return null;
 }
 
+/** 主轴/交叉轴对齐枚举（0d/0e 字段） */
+const AXIS_ALIGN: Record<number, string> = {
+  0: "FLEX_START",
+  1: "FLEX_END",
+  2: "CENTER",
+  3: "SPACING_BETWEEN",
+};
+
+/**
+ * 解析自动布局属性（编码细节见 NodeAutoLayout 注释）。
+ * 仅当几何段内存在 `1c 07` 类型块且块内含 `08 <v 0..2> 09 ...` 时返回对象；
+ * 否则返回 null（RECTANGLE/TEXT 等无自动布局，或实例内部节点继承母版）。
+ */
+function parseAutoLayout(buf: Buffer, geomPos: number, end: number): NodeAutoLayout | null {
+  const stop = Math.min(end, geomPos + 512);
+  let b1 = -1;
+  for (let i = geomPos; i + 1 < stop; i++) {
+    if (buf[i] === 0x1c && buf[i + 1] === 0x07) {
+      b1 = i;
+      break;
+    }
+  }
+  if (b1 < 0) return null;
+  const bs = b1 + 2;
+  const be = Math.min(end, bs + 200);
+
+  // flexMode(08) + itemSpacing(09)：`08 <v 0..2> 09 <紧凑浮点 | 00>`
+  let fmv: number | null = null;
+  let isv: number | null = null;
+  let padStart = -1;
+  for (let i = bs; i + 3 < be; i++) {
+    if (buf[i] !== 0x08) continue;
+    if (buf[i + 1] > 0x02) continue;
+    if (buf[i + 2] !== 0x09) continue;
+    fmv = buf[i + 1];
+    const q = i + 3;
+    if (buf[q] === 0x00) {
+      isv = 0;
+      padStart = q + 1;
+    } else if (plausibleTag(buf[q])) {
+      isv = decFloat(buf, q);
+      padStart = q + 4;
+    }
+    break;
+  }
+  if (fmv === null) return null;
+  const flexMode = fmv === 1 ? "HORIZONTAL" : fmv === 2 ? "VERTICAL" : "NONE";
+
+  // padding(0a)：`0a 01<pt> 02<pr> 03<pb> 04<pl> 00`，每边为 0 时以单字节 00 存
+  let pad: number[] | null = null;
+  let padEnd = -1;
+  if (padStart >= 0) {
+    for (let i = padStart; i + 6 < be; i++) {
+      if (buf[i] !== 0x0a) continue;
+      let q = i + 1;
+      const vals: number[] = [];
+      let good = true;
+      for (let k = 1; k <= 4; k++) {
+        if (buf[q] !== k) {
+          good = false;
+          break;
+        }
+        q++;
+        if (buf[q] === 0x00) {
+          vals.push(0);
+          q += 1;
+        } else if (plausibleTag(buf[q])) {
+          vals.push(decFloat(buf, q));
+          q += 4;
+        } else {
+          good = false;
+          break;
+        }
+      }
+      if (good && buf[q] === 0x00) {
+        pad = vals;
+        padEnd = q + 1;
+        break;
+      }
+    }
+  }
+
+  // alignItems(0d/0e)：`0d <ma> 0e <ca>`（枚举 0..3）
+  let ma: string | null = null;
+  let ca: string | null = null;
+  if (padEnd > 0) {
+    for (let i = padEnd; i + 3 < be; i++) {
+      if (buf[i] === 0x0d && buf[i + 1] <= 0x03 && buf[i + 2] === 0x0e && buf[i + 3] <= 0x03) {
+        ma = AXIS_ALIGN[buf[i + 1]] ?? null;
+        ca = AXIS_ALIGN[buf[i + 3]] ?? null;
+        break;
+      }
+    }
+  }
+
+  // sizingMode(21/22)：锚点 `1e 00 [1f <0|1>] [20 <紧凑浮点|00>] 21 <ms> [22 <xs>]`
+  // 21=主轴 sizingMode、22=交叉轴 sizingMode（0=FIXED、1=AUTO）。
+  // 21 恒存在；22 常缺省，缺省时按 AUTO 处理（实测缺省节点约 95% 真值为 AUTO）。
+  // 实测准确率：主轴 ≈99.3%，交叉轴 ≈96.7%（残差集中在含 `25 02` 继承/覆盖标记的节点）。
+  let ms: "AUTO" | "FIXED" | null = null;
+  let xs: "AUTO" | "FIXED" | null = null;
+  for (let i = bs; i + 4 < be; i++) {
+    if (buf[i] !== 0x1e || buf[i + 1] !== 0x00) continue;
+    let q = i + 2;
+    if (buf[q] === 0x1f && buf[q + 1] <= 1) q += 2;
+    if (buf[q] === 0x20) {
+      if (buf[q + 1] === 0x00) q += 2;
+      else if (plausibleTag(buf[q + 1])) q += 5;
+      else continue;
+    }
+    if (buf[q] !== 0x21) continue;
+    const cMs = buf[q + 1] === 1 ? "AUTO" : buf[q + 1] === 0 ? "FIXED" : null;
+    if (cMs === null) continue;
+    q += 2;
+    let cXs: "AUTO" | "FIXED" = "AUTO";
+    if (buf[q] === 0x22 && (buf[q + 1] === 1 || buf[q + 1] === 0)) {
+      cXs = buf[q + 1] === 1 ? "AUTO" : "FIXED";
+      q += 2;
+    }
+    ms = cMs;
+    xs = cXs;
+    break;
+  }
+
+  return {
+    flexMode,
+    itemSpacing: isv,
+    paddingTop: pad ? pad[0] : null,
+    paddingRight: pad ? pad[1] : null,
+    paddingBottom: pad ? pad[2] : null,
+    paddingLeft: pad ? pad[3] : null,
+    mainAxisAlignItems: ma,
+    crossAxisAlignItems: ca,
+    mainAxisSizingMode: ms,
+    crossAxisSizingMode: xs,
+  };
+}
+
 /**
  * 解析节点几何/布局属性（见 NodeGeometry 注释的属性语义与局限）。
  * @param type 节点的已解码类型（用于 RECTANGLE 的圆角定位）
@@ -389,6 +593,9 @@ function parseNodeGeometry(
     fills: [],
     strokes: [],
     strokeWeight: null,
+    strokeAlign: null,
+    constraints: null,
+    autoLayout: null,
   };
 
   // width(0e) / height(0f)：尺寸在 [0.001, 50000] 之间
@@ -417,6 +624,38 @@ function parseNodeGeometry(
       if (plausibleTag(buf[i + 1]) && v > 0 && v <= 5000) { g.strokeWeight = v; break; }
     }
     if (g.strokeWeight === null) g.strokeWeight = 1; // 默认 1
+  }
+
+  // strokeAlign（描边对齐，字段 13，2026-09 破解，770/770 与浏览器真值一致）：
+  //   `13 01` → CENTER、`13 02` → INSIDE、`13 03` → OUTSIDE；无 13 字段 → 默认 CENTER。
+  //   注：几何段内其它 13 字节（浮点尾数误撞）因后随字节非 01/02/03 会被跳过。
+  g.strokeAlign = "CENTER";
+  {
+    const stop = Math.min(end, geomPos + 256);
+    for (let i = geomPos; i + 1 < stop; i++) {
+      if (buf[i] !== 0x13) continue;
+      const v = buf[i + 1];
+      if (v === 0x01) { g.strokeAlign = "CENTER"; break; }
+      if (v === 0x02) { g.strokeAlign = "INSIDE"; break; }
+      if (v === 0x03) { g.strokeAlign = "OUTSIDE"; break; }
+    }
+  }
+
+  // constraints（布局约束，2026-09 破解）：
+  //   字段 0b=vertical、0c=horizontal，枚举 `01`=END、`03`=CENTER、`04`=SCALE；字段缺省=START。
+  //   两字段仅在该轴为非默认值时出现（如 `0b 03 0c 03` → 垂直/水平皆 CENTER）。
+  //   实测垂直 546/548、水平 546/548 与浏览器真值一致；偏差为实例内部节点继承母版约束。
+  {
+    const stop = Math.min(end, geomPos + 16);
+    const dec = (v: number | undefined): string =>
+      v === 0x01 ? "END" : v === 0x03 ? "CENTER" : v === 0x04 ? "SCALE" : "START";
+    let vv: number | undefined;
+    let hv: number | undefined;
+    for (let i = geomPos; i + 1 < stop; i++) {
+      if (buf[i] === 0x0b && buf[i + 1] <= 0x05) vv = buf[i + 1];
+      else if (buf[i] === 0x0c && buf[i + 1] <= 0x05) hv = buf[i + 1];
+    }
+    g.constraints = { horizontal: dec(hv), vertical: dec(vv) };
   }
 
   // x / y 与完整仿射变换：18 块「18 <子块...> 00」。
@@ -512,6 +751,9 @@ function parseNodeGeometry(
     }
   }
 
+  // autoLayout：位于几何段内 `1c 07` 类型块，编码见 NodeAutoLayout 注释。
+  g.autoLayout = parseAutoLayout(buf, geomPos, end);
+
   return g;
 }
 
@@ -576,6 +818,18 @@ export function parsePageTree(buf: Buffer, pageId: string): PageTree {
   }
 
   const root = tnodes.get(pageId)!;
+  // 预建 parent → children 映射：一次线性归组，避免对每个节点都遍历全部节点（O(n²) → O(n)）。
+  const childrenOf = new Map<string, TreeNode[]>();
+  for (const t of tnodes.values()) {
+    if (t.parent === null || t.parent === t.id) continue; // 跳过页面根与自引用
+    const arr = childrenOf.get(t.parent);
+    if (arr) arr.push(t);
+    else childrenOf.set(t.parent, [t]);
+  }
+  // 按原子节顺序排序每个父节点的子节点
+  const posOf = (id: string): number => byId.get(id)?.pos ?? 0;
+  for (const arr of childrenOf.values()) arr.sort((a, b) => posOf(a.id) - posOf(b.id));
+
   // 只保留能一路回溯到 pageId 的节点（本页子树）
   const keep = new Set<string>();
   const stack = [pageId];
@@ -586,19 +840,9 @@ export function parsePageTree(buf: Buffer, pageId: string): PageTree {
     if (keep.has(cur)) continue;
     keep.add(cur);
     order.push(cur);
-    const me = tnodes.get(cur);
-    if (!me) continue;
-    // 找 cur 的子节点
-    const kids: TreeNode[] = [];
-    for (const [id, t] of tnodes) {
-      if (id === cur) continue;
-      if (t.parent === cur) {
-        kids.push(t);
-        stack.push(id);
-      }
-    }
-    // 按原子节顺序排序子节点
-    kids.sort((a, b) => (byId.get(a.id)?.pos ?? 0) - (byId.get(b.id)?.pos ?? 0));
+    if (!tnodes.has(cur)) continue;
+    const kids = childrenOf.get(cur) ?? [];
+    for (const k of kids) stack.push(k.id);
     children[cur] = kids;
   }
 

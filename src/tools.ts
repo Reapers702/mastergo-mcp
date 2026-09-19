@@ -144,7 +144,11 @@ export function buildTools(): ToolDef[] {
         "SLICE/INSTANCE/BOOLEAN_OPERATION；实测类型 100% 与浏览器一致）。" +
         "几何属性 geometry 含可靠的 width/height/opacity/cornerRadius（圆角仅 RECTANGLE）" +
         "与 x/y 坐标（带符号，positionSignResolved 恒为 true）、rotation（角度）/transform（仿射矩阵）、" +
-        "fills/strokes（RGBA 纯色，经 paint 定义表解析）、strokeWeight（描边宽度，实测 63/63 与浏览器一致）。" +
+        "fills/strokes（RGBA 纯色，经 paint 定义表解析）、strokeWeight（描边宽度，实测 63/63 与浏览器一致）、" +
+        "strokeAlign（描边对齐，实测 776/776 与浏览器一致）、constraints（布局约束 horizontal/vertical，" +
+        "实测 546/548 与浏览器一致）、autoLayout（自动布局：flexMode/itemSpacing/padding 四边/" +
+        "mainAxisAlignItems/crossAxisAlignItems/mainAxisSizingMode/crossAxisSizingMode；flexMode 实测 " +
+        "33024/33061 与浏览器一致，sizingMode 主轴 ≈99.3%、交叉轴 ≈96.7%，仅实例内部节点为 null）。" +
         "颜色仅保证 SOLID 填料（kind='SOLID'）；IMAGE/GRADIENT/UNKNOWN 物件 color 为 null。" +
         "参数 file 传文件 ID 或完整 URL；page 传具体页（可沿用 list_pages 返回的页面 id，或 URL 中 page_id）。",
       params: {
