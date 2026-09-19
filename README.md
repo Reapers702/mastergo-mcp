@@ -63,6 +63,7 @@ npx tsx src/index.ts --cookie "gfsessionid=..." --url https://mastergo.com
 | `list_pages` | 文件内全部页面列表（页面 ID + 页面名） | `/data/{fileKey}` 二进制索引 |
 | `get_file_nodes` | 全量节点索引：全部页面 + 所有名节点的 id/名称（支持按名搜索、限量） | `/data/{fileKey}` 二进制索引（全量下载） |
 | `get_page_tree` | 指定页面节点树：id、名称、类型、父节点 id、父子层级（支持限深展开） | `/data/{fileKey}` 二进制节点树解码 |
+| `list_styles` | 文件本地 paint 样式（颜色样式）：id、名称、collection、ukey、RGBA（按 ukey 筛本文件定义） | `/data/{fileKey}` 二进制 paint 样式聚合记录 |
 
 ### 推荐工作流
 
@@ -100,7 +101,11 @@ src/
   - fill(纯色)/stroke 已破解：颜色不内联在节点记录，而存于独立的 **paint 定义表**（`01 <selfId>\0 02 <refId>\0 03 61 30\0 00 08 <A> <R> <G> <B> [09 <A'>]`，实测 987 条，RGBA 用紧凑浮点编码）。节点记录里 `15 <refId>`（图元 fill）/`16/17 <refId>`（stroke）/`09 01 02 02 03 <refId>`（TEXT fill）引用该表。solid 纯色对照浏览器真值 143/153 命中（余为渐变/实例内部/隐藏描边）。
 - [x] **strokeWeight（描边宽度）**：描边宽度已破解。几何段内、13 引用块之前，key=`0x10`：`10 00`→0（隐藏描边）、`10 <4字节紧凑浮点>`→权重值、无该字段→默认 1。实测 63/63 与浏览器真值一致。
 - [ ] **layout 布局约束（flexMode/padding/itemSpacing）**：自动布局帧的 `layoutMode/paddingTop/Bottom/Left/Right/itemSpacing` 字段尚未解码。**阻塞原因**：当前火车票设计稿全树 `layoutMode` 恒为 `NONE`（无 autolayout 帧），二进制中无对应真值可对照；需先打开一个**含自动布局帧**的 MasterGo 文件（浏览器 `window.mg` 导出真值）才能继续。
-- [ ] **组件与样式资源**：读取文件级组件库、颜色/文字/效果样式
+- [ ] **组件与样式资源（部分完成）**：颜色样式（paint 样式）已破解并交付 `list_styles` 工具，实测 4/4 与浏览器 `getLocalPaintStyles()` 真值一致；文字样式 / 效果样式 / 组件库尚未实现。
+  - paint 样式聚合记录格式：`01 <selfId>\0 02 <name>\0 03 61 <subtype>\0 [04 00] 05 01 00 00 06 01 07 <ukey>\0 08 ...`，按 `07` 后 ukey 前缀 `fileId+` 筛本文件定义；SOLID 样式 RGBA 走 paint 定义表（`buildPaintTable`）查询 selfId 拿到颜色。
+  - collectionId 默认 `M:1`、collectionName 默认 `集合`：二进制中**没有独立 collection 表**（搜 `fileId+M:` 0 命中），疑似客户端对每个文件默认构造一个 collection。
+  - 渐变样式（GRADIENT_LINEAR/RADIAL）目前只标记 kind，渐变 stops 多色解码暂未实现，color 为 null。
+  - 阻塞：本文件 0 个文字样式、0 个效果样式，需打开含此类样式的设计稿才能继续逆向。
 - [ ] **变量（Variables）**：Design Tokens 的读取与引用关系
 - [ ] **图片/切图导出**：节点导出为 PNG/SVG/PDF，可交付到本地目录
 - [ ] **设计稿差异对比**：两份文件/版本间节点 diff

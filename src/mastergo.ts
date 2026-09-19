@@ -198,6 +198,22 @@ export class MasterGoClient {
     return parsePageTree(buf, pageId);
   }
 
+  /**
+   * 文件本地 paint 样式列表（颜色样式）：扫描 /data/{fileKey} 二进制中所有 paint 样式
+   * 聚合记录，按 ukey 前缀匹配 fileId 筛本文件定义的样式（不含团队库/外部引用）。
+   *
+   * 实测（2026-09 火车票文件）：返回 4 个本地 paint 样式，id/name/ukey/RGBA 颜色
+   * 全部与浏览器 getLocalPaintStyles() API 真值一致（4/4 命中）。
+   *
+   * @param fileKey UUID（如 890c5c78-...），用于拉取 /data 二进制
+   * @param fileId 数字 documentId（如 115278536821990），用于筛 ukey 前缀
+   */
+  async getLocalStyles(fileKey: string, fileId: string): Promise<any> {
+    const { listLocalPaintStyles } = await import("./node-tree.js");
+    const buf = await this.fetchData(fileKey);
+    return listLocalPaintStyles(buf, fileId);
+  }
+
   // ---- /mcp/* 网关接口已完全移除（不依赖官方 MCP，走纯网页 API 自研） ----
 }
 

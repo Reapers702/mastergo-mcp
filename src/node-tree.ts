@@ -290,9 +290,23 @@ interface PaintEntry {
  */
 function buildPaintTable(buf: Buffer): Map<string, PaintEntry> {
   const table = new Map<string, PaintEntry>();
-  // 仅需线性扫描匹配 `03 61 30 00 08`，47MB 量级足够快
-  for (let i = 0; i + 5 < buf.length; i++) {
-    if (!(buf[i] === 0x03 && buf[i + 1] === 0x61 && buf[i + 2] === 0x30 && buf[i + 3] === 0x00 && buf[i + 4] === 0x08)) continue;
+  // 扫描 `03 61 30 00` 锚点，兼容两种 paint 表条目格式：
+  //   1. 紧凑：`03 61 30 00 08 <4×紧凑浮点>`                 （i+4 = 08）
+  //   2. 扩展：`03 61 30 00 04 00 05 00 06 01 07 00 08 <...>` （i+4 = 04 00，08 在 i+11）
+  // 扩展格式原漏扫（实测 5481:060533 等 SOLID paint 表条目用扩展格式，导致样式 selfId
+  // 在 paintMap 中查不到，listLocalPaintStyles 误判为 GRADIENT）。
+  for (let i = 0; i + 4 < buf.length; i++) {
+    if (!(buf[i] === 0x03 && buf[i + 1] === 0x61 && buf[i + 2] === 0x30 && buf[i + 3] === 0x00)) continue;
+    // 定位 08 字段：紧凑直接 i+4；扩展在 [i+6, i+24) 范围内查找
+    let off08 = -1;
+    if (buf[i + 4] === 0x08) {
+      off08 = i + 4;
+    } else if (buf[i + 4] === 0x04 && buf[i + 5] === 0x00) {
+      for (let k = i + 6; k < i + 24 && k + 4 < buf.length; k++) {
+        if (buf[k] === 0x08) { off08 = k; break; }
+      }
+    }
+    if (off08 < 0) continue;
     // 回溯到 paint 头 `01 <selfId>\0 02 <refId>\0`，要求 refId 结尾正好指着 anchor（03）
     let selfId: string | null = null;
     let refId: string | null = null;
@@ -309,7 +323,7 @@ function buildPaintTable(buf: Buffer): Map<string, PaintEntry> {
     }
     if (!selfId || !refId) continue;
     // 解 08 后的 RGBA
-    let p = i + 5;
+    let p = off08 + 1;
     const f = (): number => {
       const tag = buf[p];
       const v = (0x1000000 + buf[p + 3] * 65536 + buf[p + 2] * 256 + buf[p + 1]) * Math.pow(2, tag - 151);
@@ -590,4 +604,118 @@ export function parsePageTree(buf: Buffer, pageId: string): PageTree {
 
   const nodes = order.map((id) => tnodes.get(id)!);
   return { pageId, root, nodes, children };
+}
+
+/**
+ * 文件级 paint 样式（颜色样式）。
+ *
+ * 实测（2026-09 火车票文件，4 个本地 paint 样式与浏览器 getLocalPaintStyles() 真值一致）：
+ *   - id / name / ukey 与真值完全一致（4/4 命中）
+ *   - SOLID 样式的 RGBA 颜色经 paint 定义表（buildPaintTable）查询 refId=selfId 获取，
+ *     与浏览器 API 真值一致
+ *   - 渐变样式（GRADIENT_LINEAR/RADIAL）暂只标记 kind，color 为 null
+ *     （渐变 stops 多色解码暂未实现，留待后续）
+ *
+ * collectionId 默认 "M:1"、collectionName 默认 "集合"：实测本文件 4 个本地 paint 样式
+ * 全部归属同一 collection（"M:1" / "集合"），但二进制中**没有独立 collection 表**存储
+ * 这两字段（搜 "115278536821990+M:" 0 命中），疑似 MasterGo 客户端对每个文件默认构造
+ * 一个 collection。本实现先按约定硬编码，若未来发现多 collection 文件需调整。
+ */
+export interface PaintStyle {
+  /** 样式 id（selfId，形如 "5481:060533"） */
+  id: string;
+  /** 样式名（如 "f1f4fb"、"渐变"、"1"、"2"） */
+  name: string;
+  /** 样式类型，目前仅支持 "PAINT" */
+  type: "PAINT";
+  /** collectionId（本文件默认 "M:1"） */
+  collectionId: string;
+  /** collectionName（本文件默认 "集合"） */
+  collectionName: string;
+  /** ukey（fileId+selfId） */
+  ukey: string;
+  /** 是否来自外部文件（本文件扫描时按 ukey 前缀筛掉外部，恒为 false） */
+  isExternal: boolean;
+  /** 样式包含的 paint 列表（SOLID 给 color，渐变等 color 为 null） */
+  paints: NodePaint[];
+}
+
+/**
+ * 扫描二进制中所有 paint 样式聚合记录，返回**本文件定义**的 paint 样式列表。
+ *
+ * Paint 样式聚合记录格式（2026-09 破解，4/4 本地样式与浏览器 API 真值一致）：
+ *       01 <selfId> \0 02 <name> \0 03 61 <subtype> \0 [04 00] 05 01 00 00 06 01 07 <ukey> \0 08 ...
+ *   - 01：样式 selfId（如 "5481:060533"）
+ *   - 02：样式名（如 "f1f4fb"）
+ *   - 03 61 <subtype>：类型 PAINT（0x61='a'），subtype 0x40+ 是样式聚合记录独有
+ *     （paint 表条目 subtype=0x30，节点记录 typeRaw 也叫 a1/a2 等但不会同时有
+ *     `05 01 00 00 06 01 07 <ukey>` 后缀）
+ *   - 04 00：可选 flag 字段（部分样式有，含义未知）
+ *   - 05 01 00 00 06 01：固定字节，疑似 version/flag
+ *   - 07 <ukey>：ukey = fileId+selfId（如 "115278536821990+5481:060533"）
+ *   - 08 <???>：paint 子项引用（结构复杂，暂不解；颜色走 paint 定义表查 selfId）
+ *
+ * 锚点：`03 61 <subtype> 00 [04 00] 05 01 00 00 06 01 07 <ukey>`，精准区分 paint 样式
+ * 聚合记录 vs 节点记录（节点 typeRaw 也叫 aX 但没有此后缀）。
+ *
+ * 本文件样式筛选用 ukey 前缀匹配 fileId+'+'：ukey 形如 "115278536821990+<selfId>" 是本文件
+ * 定义，其他 ukey 前缀（如 "87978417736562+..."）是外部样式引用（来自团队库/组件库）。
+ *
+ * @param buf /data 二进制
+ * @param fileId 数字 documentId（如 115278536821990），用于筛本文件 ukey 前缀
+ */
+export function listLocalPaintStyles(buf: Buffer, fileId: string): PaintStyle[] {
+  const paintMap = buildPaintTable(buf);
+  const prefix = fileId + "+";
+  const styles: PaintStyle[] = [];
+
+  for (let i = 0; i + 11 < buf.length; i++) {
+    if (!(buf[i] === 0x03 && buf[i + 1] === 0x61 && buf[i + 3] === 0x00)) continue;
+    let p = i + 4;
+    if (buf[p] === 0x04 && buf[p + 1] === 0x00) p += 2;
+    if (
+      !(buf[p] === 0x05 && buf[p + 1] === 0x01 && buf[p + 2] === 0x00 &&
+        buf[p + 3] === 0x00 && buf[p + 4] === 0x06 && buf[p + 5] === 0x01 && buf[p + 6] === 0x07)
+    ) continue;
+    // 回溯找 01 <id>\0 02 <name>\0
+    let selfId: string | null = null;
+    let name: string | null = null;
+    for (let j = i - 1; j >= Math.max(0, i - 200); j--) {
+      if (buf[j] !== 0x01) continue;
+      const ca = readCstr(buf, j + 1);
+      if (!ca || !ID_RE.test(ca.s)) continue;
+      if (buf[ca.next] !== 0x02) continue;
+      const cb = readCstr(buf, ca.next + 1);
+      if (!cb || cb.next !== i) continue;
+      selfId = ca.s;
+      name = cb.s;
+      break;
+    }
+    if (!selfId || !name) continue;
+    const ukey = readCstr(buf, p + 7);
+    if (!ukey || !ukey.s.startsWith(prefix)) continue; // 只取本文件样式
+
+    // 查 paint 定义表：SOLID 样式 selfId 是 paint 表条目的 refId，
+    // buildPaintTable 已建 selfId+refId 双索引，可直接查 selfId 拿 RGBA。
+    const entry = paintMap.get(selfId);
+    const kind: NodePaint["kind"] = entry ? entry.kind : "GRADIENT";
+    const paints: NodePaint[] = [
+      {
+        refId: selfId,
+        kind,
+        color: entry ? entry.color : null,
+      },
+    ];
+    styles.push({
+      id: selfId,
+      name,
+      type: "PAINT",
+      collectionId: "M:1",
+      collectionName: "集合",
+      ukey: ukey!.s,
+      isExternal: false,
+      paints,
+    });
+  }
+  return styles;
 }

@@ -6,7 +6,9 @@
  *   - get_file_meta：文件元信息（/api/v1/documents/{id}）
  *   - list_pages：页面列表（解析 /data/{fileKey} 私有二进制索引）
  *   - get_file_nodes：全量节点索引（页面 + 全部名节点的 id/名称，可搜索过滤）
- * 更深的读取能力（节点树层级 / 类型 / 组件 / 样式 / 导出）将在后续通过网页二进制自研增量加入。
+ *   - get_page_tree：节点树（父子层级 + 类型 + 几何/布局属性 + 颜色/描边）
+ *   - list_styles：文件本地 paint 样式（颜色样式，按 ukey 筛本文件定义）
+ * 更深的读取能力（文字样式 / 效果样式 / 组件库 / 变量 / 导出）将在后续通过网页二进制自研增量加入。
  */
 
 import { z } from "zod";
@@ -198,6 +200,36 @@ export function buildTools(): ToolDef[] {
           totalNodes: tree.nodes.length,
           maxDepth: maxDepth === Infinity ? "full" : maxDepth,
           nodes: outNodes,
+        });
+      },
+    },
+
+    {
+      name: "list_styles",
+      description:
+        "列出 MasterGo 文件本地 paint 样式（颜色样式）：id、名称、collection、ukey、paint 颜色等。" +
+        "通过浏览器 Cookie 全量下载 /data/{fileKey} 私有二进制，扫描 paint 样式聚合记录，" +
+        "按 ukey 前缀匹配 fileId 筛本文件定义的样式（不含团队库/外部引用）。" +
+        "实测（2026-09 火车票文件）：4 个本地 paint 样式的 id/name/ukey/RGBA 颜色全部与" +
+        "浏览器 getLocalPaintStyles() API 真值一致（4/4 命中）。" +
+        "渐变样式（GRADIENT_LINEAR/RADIAL）目前只标记 kind，渐变 stops 多色解码暂未实现，color 为 null；" +
+        "collectionId 默认 'M:1'、collectionName 默认 '集合'（二进制中无独立 collection 表，疑似客户端默认构造）。" +
+        "参数 file 传文件 ID 或完整 URL。",
+      params: {
+        file: z.string().describe("MasterGo 文件 ID 或完整文件 URL（必填）"),
+      },
+      run: async (client, args) => {
+        const { fileId } = normalize(String(args.file));
+        const meta = await client.getFileMeta(fileId);
+        const fileKey: string | undefined = meta.data?.fileKey;
+        if (!fileKey) throw new MasterGoError("无法获取 fileKey，请检查文件 ID 与访问权限");
+        const styles = await client.getLocalStyles(fileKey, fileId);
+        return jsonOut({
+          source: "web-data-style-index",
+          fileId,
+          fileKey,
+          totalStyles: styles.length,
+          styles,
         });
       },
     },
