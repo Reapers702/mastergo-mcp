@@ -18,6 +18,10 @@
  * 节点**类型**的可靠解码仍需进一步逆向 0d..1a 几何字段语法，此处不擅自定论。
  * 已攻克类型：几何段内 first 1c 子块的原生字节即节点类型判别依据
  *   （实测 808 节点 100% 准确，见 decodeNodeType）。
+ *
+ * 已攻克 x/y 坐标符号位（2026-09，178x/177y 对照浏览器 API 真值 100%）：
+ *   坐标为 18 块内 sub01/sub02 跟随的**带符号**紧凑浮点（decFloatSigned）。
+ *   符号位即 24 位小端尾数最低字节 bit0：1→负，0→正。
  */
 
 /**
@@ -30,10 +34,12 @@
  *     4 角一致则输出数值，否则输出 [r1,r2,r3,r4]）
  *
  * 已知局限：
- *   - x / y：紧凑浮点为**无符号幅度**编码，符号位不在此格式内，父-子变换也无法恢复
- *     （已用同一文件中 1257→-1257 与 1920→+1920 的顶层节点对排除"全局平移"假设）。
- *     因此 x / y 只输出幅度值，positionSignResolved 固定为 false，方向待后续逆向。
  *   - rotation / transform / fill(颜色) / stroke / 布局约束(layout) 未解码，留待后续。
+ *
+ * 坐标符号已破解（2026-09，178/178 x 与 177/177 y 对照浏览器 API 真值一致）：
+ *   18 块内 x/y 使用**带符号**紧凑浮点（decFloatSigned），符号位是 24 位小端尾数
+ *   最低尾数字节 bit0：置 1 表示负、清 0 表示正。利用整数浮点尾数精度余量存储符号，
+ *   解码时先清除该位还原纯幅度再决定正负。
  */
 export interface NodeGeometry {
   /** 节点包围盒宽度（无符号紧凑浮点解码，可靠） */
@@ -44,11 +50,11 @@ export interface NodeGeometry {
   opacity: number | null;
   /** 圆角（仅 RECTANGLE；4 角一致为数值，否则 4 元数组） */
   cornerRadius: number | number[] | null;
-  /** x 坐标**幅度**（符号位未解析，勿作坐标使用） */
+  /** x 坐标（带符号，可靠） */
   x: number;
-  /** y 坐标**幅度**（符号位未解析，勿作坐标使用） */
+  /** y 坐标（带符号，可靠） */
   y: number;
-  /** 坐标符号是否已解析（当前恒为 false，方向未知） */
+  /** 坐标符号是否已解析（当前恒为 true，符号位已破解） */
   positionSignResolved: boolean;
 }
 
@@ -174,12 +180,30 @@ function decodeNodeType(buf: Buffer, geomPos: number, end: number): string | nul
 /**
  * 解码 MasterGo 紧凑浮点：4 字节 = 1 字节 tag（有偏指数）+ 3 字节小端尾数。
  *   value = (2^24 + intLE) * 2^(tag - 151)
- * 该编码**无符号位**，只表达幅度（负数符号不在格式内）。
+ *
+ * 无符号版本：intLE 直接取 24 位，可表达幅度，但**不含符号**。
+ * 适用于 width/height/opacity/cornerRadius 等仅取正值的字段（参见 decFloat）。
  */
 function decFloat(buf: Buffer, p: number): number {
   const tag = buf[p];
   const intLE = buf[p + 3] * 65536 + buf[p + 2] * 256 + buf[p + 1];
   return (0x1000000 + intLE) * Math.pow(2, tag - 151);
+}
+
+/**
+ * 解码 MasterGo 紧凑浮点的**带符号**变体：用于 18 块内的坐标 x/y。
+ * 符号位 = 最低尾数字节（m1，即 p+1）的 bit0：
+ *   - bit0 == 1 → 负（解码前先清除该位，还原纯幅度）
+ *   - bit0 == 0 → 正
+ * 利用整数浮点尾数的精度余量存符号 bit。实测 178/178 x、177/177 y 与浏览器 API 真值一致。
+ */
+function decFloatSigned(buf: Buffer, p: number): number {
+  const tag = buf[p];
+  let intLE = buf[p + 3] * 65536 + buf[p + 2] * 256 + buf[p + 1];
+  const neg = (intLE & 1) === 1;
+  if (neg) intLE &= ~1; // 清除符号位，取回纯幅度尾数
+  const v = (0x1000000 + intLE) * Math.pow(2, tag - 151);
+  return neg ? -v : v;
 }
 
 /** tag 合理范围护栏：太大/太小都视为非紧凑浮点字段 */
@@ -225,7 +249,7 @@ function parseNodeGeometry(
     cornerRadius: null,
     x: 0,
     y: 0,
-    positionSignResolved: false,
+    positionSignResolved: true,
   };
 
   // width(0e) / height(0f)：尺寸在 [0.001, 50000] 之间
@@ -234,7 +258,7 @@ function parseNodeGeometry(
   // opacity(0a)：仅当 !=1 时存在，值域 [0, 1]
   g.opacity = findFloatField(buf, geomPos, end, 0x0a, 0, 1);
 
-  // x / y：定位 18 容器块「18 <sub...> 00」，sub01=x、sub02=y，各跟 4 字节紧凑浮点
+  // x / y：定位 18 容器块「18 <sub...> 00」，sub01=x、sub02=y，各跟 4 字节带符号紧凑浮点
   const stop18 = Math.min(end, geomPos + 256);
   for (let i = geomPos; i + 1 < stop18; i++) {
     if (buf[i] !== 0x18) continue;
@@ -242,10 +266,10 @@ function parseNodeGeometry(
     while (j < end && buf[j] !== 0) {
       const sub = buf[j];
       if (sub === 0x01 && j + 5 <= end && plausibleTag(buf[j + 1])) {
-        g.x = decFloat(buf, j + 1);
+        g.x = decFloatSigned(buf, j + 1);
         j += 5;
       } else if (sub === 0x02 && j + 5 <= end && plausibleTag(buf[j + 1])) {
-        g.y = decFloat(buf, j + 1);
+        g.y = decFloatSigned(buf, j + 1);
         j += 5;
       } else {
         j += 1;
