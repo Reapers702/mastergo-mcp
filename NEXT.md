@@ -92,6 +92,7 @@
 - **legacy 格式 COMPONENT 识别** —— 已补齐（复用 modern 的零假阳性 `selfUkey` 判据）。
 - **文字样式 / 效果样式 / 变量** —— 已实现并交付 3 个工具（原 P1 全部三项）。
 - **组件索引表** —— ✅ 已实现 `list_components`（2026-09-20），火车票 96/96 与 `getComponentListVal()` 真值一致，详见 README ④。
+- **节点级渐变 fill** —— ✅ 已完成（2026-09-20）。节点 fill 引用的 `refId` 若命中渐变 paint 表，`get_page_tree` 的 `geometry.fills` 直接输出渐变（`type`/`gradientStops`/`gradientHandlePositions`），不再退回 `UNKNOWN/null`。实测「定稿5：首页火车票卡片」页面 20 个渐变 fill 节点；已加 `test:regress` 守卫（`checkNodeGradFills`）。
 
 ---
 

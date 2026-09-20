@@ -131,6 +131,7 @@ src/
   - x/y 符号位已破解：坐标为 18 块内 `01/02` 子块跟随的**带符号**紧凑浮点，符号位是 24 位小端尾数最低字节 bit0（置 1 为负、清 0 为正，`positionSignResolved` 恒为 `true`）。
   - rotation/transform 已破解：18 块容纳完整仿射变换，子 `01=tx(x)`、`02=ty(y)`、`03..06` 按 `(m00,m11,m01,m10)` 顺序打包 2×2 矩阵 `m=[[s3,s5],[s6,s4]]`，`rotation = atan2(m10,m00)`（度；无旋转子 03..06 省略为单位阵）。8 个 rotation 节点对照浏览器 `relativeTransform` 真值 8/8 一致。
   - fill(纯色)/stroke 已破解：颜色不内联在节点记录，而存于独立的 **paint 定义表**（`01 <selfId>\0 02 <refId>\0 03 61 30\0 00 08 <A> <R> <G> <B> [09 <A'>]`，实测 987 条，RGBA 用紧凑浮点编码）。节点记录里 `15 <refId>`（图元 fill）/`16/17 <refId>`（stroke）/`09 01 02 02 03 <refId>`（TEXT fill）引用该表。solid 纯色对照浏览器真值 143/153 命中（余为渐变/实例内部/隐藏描边）。
+  - **节点级渐变 fill（2026-09）**：节点 fill 引用的 `refId` 若命中渐变 paint 表（`buildGradientTable`），直接复用渐变解码输出 `type`/`gradientStops`/`gradientHandlePositions`，而不再退回 paintMap 得到 `UNKNOWN/null`（渐变键在 paintMap 中恒「不含」）。`parseNodeGeometry` 新增 `gradientMap` 参数，`parsePageTree` 每页构建一份渐变表。实测火车票「定稿5：首页火车票卡片」页面 20 个渐变 fill 节点，抽查节点 3914:24830 的 fill 为 `GRADIENT_LINEAR` 双 stop + 手柄。已加入 `test:regress`（`checkNodeGradFills`）作守护。
 - [x] **strokeWeight（描边宽度）**：描边宽度已破解。几何段内、13 引用块之前，key=`0x10`：`10 00`→0（隐藏描边）、`10 <4字节紧凑浮点>`→权重值、无该字段→默认 1。实测 63/63 与浏览器真值一致。
 - [x] **strokeAlign（描边对齐）**：字段 `13`：`01`→CENTER、`02`→INSIDE、`03`→OUTSIDE，缺省 CENTER。实测 776/776 与浏览器真值一致。
 - [x] **constraints（布局约束）**：字段 `0b`=vertical、`0c`=horizontal：`01`→END、`03`→CENTER、`04`→SCALE，字段缺省→START；两字段仅在该轴非默认值时出现（如 `0b 03 0c 03` 即垂直/水平皆 CENTER）。实测垂直 546/548、水平 546/548 与浏览器真值一致（2 例偏差为实例内部节点继承母版约束）。

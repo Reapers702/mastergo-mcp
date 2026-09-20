@@ -840,13 +840,16 @@ function parseAutoLayout(buf: Buffer, geomPos: number, end: number): NodeAutoLay
  * 解析节点几何/布局属性（见 NodeGeometry 注释的属性语义与局限）。
  * @param type 节点的已解码类型（用于 RECTANGLE 的圆角定位）
  * @param paintMap 全量 paint 定义表（用于解析 fill/stroke 颜色；为 null 时不解析）
+ * @param gradientMap 渐变 paint 表（按 refId 聚合）。节点 fill 引用的 refId 命中此表时，
+ *        直接复用渐变解码输出（type/stops/handles），否则退回 paintMap 查 SOLID。
  */
 function parseNodeGeometry(
   buf: Buffer,
   geomPos: number,
   end: number,
   type: string | null,
-  paintMap?: Map<string, PaintEntry>
+  paintMap?: Map<string, PaintEntry>,
+  gradientMap?: Map<string, NodePaint[]>
 ): NodeGeometry {
   const g: NodeGeometry = {
     width: null,
@@ -987,12 +990,14 @@ function parseNodeGeometry(
     }
   }
 
-  // fills / strokes：提取几何段内的 paint 引用 id 并经 paintMap 关联颜色。
+  // fills / strokes：提取几何段内的 paint 引用 id 并经 paint 表关联颜色/渐变。
   //   图元：`15 <refId>\0` 视为 fill，`16/17 <refId>\0` 视为 stroke（含 inline paint）。
   //   TEXT：`09 01 02 02 03 <refId>\0` 承载 fill 引用。
   // 实测（2019 火车票）：153 个 SOLID fill 节点中 142 个经此路径 RGBA 与浏览器真值一致，
   // 剩余为渐变/实例内部引用/半透明边界等边缘场景。
-  if (paintMap) {
+  // 渐变：节点 fill 引用的 refId 若命中 gradientMap，直接复用渐变解码（type/stops/handles），
+  // 不再退回 paintMap（渐变键在 paintMap 中恒「不含」，原为 kind=UNKNOWN、color=null）。
+  if (paintMap || gradientMap) {
     const stopP = Math.min(end, geomPos + 512);
     for (let i = geomPos; i + 1 < stopP; i++) {
       const k = buf[i];
@@ -1010,7 +1015,12 @@ function parseNodeGeometry(
         }
       }
       if (refId === null || target === null) continue;
-      const entry = paintMap.get(refId);
+      const grads = gradientMap?.get(refId);
+      if (grads && grads.length) {
+        for (const gp of grads) target.push(gp);
+        continue;
+      }
+      const entry = paintMap?.get(refId);
       target.push({
         refId,
         kind: entry ? entry.kind : "UNKNOWN",
@@ -1089,8 +1099,9 @@ export function parsePageTree(buf: Buffer, pageId: string): PageTree {
     }
   }
 
-  // 构建节点对象（含一面 paint 表用于 fill/stroke 颜色）
+  // 构建节点对象（含一面 paint 表用于 fill/stroke 颜色、渐变表用于节点渐变 fill）
   const paintMap = buildPaintTable(buf);
+  const gradientMap = buildGradientTable(buf);
   const tnodes = new Map<string, TreeNode>();
   for (const [id, r] of byId) {
     let parent = r.parent;
@@ -1106,7 +1117,7 @@ export function parsePageTree(buf: Buffer, pageId: string): PageTree {
       typeRaw: r.typeRaw,
       anchor: r.anchor,
       type,
-      geometry: parseNodeGeometry(buf, r.geomPos, end, type, paintMap),
+      geometry: parseNodeGeometry(buf, r.geomPos, end, type, paintMap, gradientMap),
     });
   }
 

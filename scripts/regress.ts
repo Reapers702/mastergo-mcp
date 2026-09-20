@@ -125,7 +125,8 @@ async function main() {
   console.log(ok ? "  ✅ PASS" : "  ❌ FAIL");
 
   const stylesOk = checkStyles(buf);
-  if (!ok || !stylesOk) process.exit(1);
+  const gradOk = checkNodeGradFills(buf);
+  if (!ok || !stylesOk || !gradOk) process.exit(1);
 }
 
 /**
@@ -174,6 +175,50 @@ function checkStyles(buf: Buffer): boolean {
       ok = false;
     }
   }
+  console.log(ok ? "  ✅ PASS" : "  ❌ FAIL");
+  return ok;
+}
+
+/**
+ * 节点级渐变 fill 守卫（2026-09）。
+ *
+ * 背景：节点记录里 `15 <refId>`（图元 fill）若 refId 命中渐变 paint 表，应直接复用渐变解码，
+ * 输出 type/gradientStops/gradientHandlePositions，而不是退回 paintMap 得到 UNKNOWN/null。
+ *
+ * 基线（火车票公开文件「定稿5：首页火车票卡片」页面 1984:13313）：20 个渐变 fill 节点；
+ * 抽查 3914:24830（RECTANGLE）的 fill 为 GRADIENT_LINEAR 双 stop、含手柄。
+ */
+function checkNodeGradFills(buf: Buffer): boolean {
+  const pageId = "1984:13313";
+  const tree = parsePageTree(buf, pageId);
+  let gradNodes = 0;
+  let unknownFills = 0;
+  let ok = true;
+
+  for (const n of tree.nodes) {
+    const fills = n.geometry?.fills ?? [];
+    for (const p of fills) {
+      if (p.kind === "GRADIENT") gradNodes++;
+      else if (p.kind === "UNKNOWN") unknownFills++;
+    }
+  }
+
+  console.log(`[regress] 节点渐变 fill 解码回归`);
+  console.log(`  gradient fill 项 = ${gradNodes}（基线 ≥ 20）`);
+  console.log(`  UNKNOWN fill 项  = ${unknownFills}`);
+
+  if (gradNodes < 20) {
+    console.log(`  ❌ gradient fill 项过少（${gradNodes}）`);
+    ok = false;
+  }
+
+  const probe = tree.nodes.find((n) => n.id === "3914:24830");
+  const gp = probe?.geometry?.fills?.find((p) => p.kind === "GRADIENT");
+  if (!gp || gp.type !== "GRADIENT_LINEAR" || !gp.gradientStops || gp.gradientStops.length < 2 || !gp.gradientHandlePositions) {
+    console.log(`  ❌ 抽查节点 3914:24830 渐变 fill 结构异常: ${JSON.stringify(gp?.type)}`);
+    ok = false;
+  }
+
   console.log(ok ? "  ✅ PASS" : "  ❌ FAIL");
   return ok;
 }
