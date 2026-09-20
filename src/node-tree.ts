@@ -106,6 +106,31 @@ export interface NodePaint {
   kind: "SOLID" | "IMAGE" | "GRADIENT" | "UNKNOWN";
   /** 解析出的 RGBA；非 SOLID 可能为 null */
   color: NodeColor | null;
+  /** 渐变类型（仅 kind==="GRADIENT" 时存在） */
+  type?: GradientType;
+  /** 渐变多色 stops（仅渐变；`{position, color}`，position∈[0,1]） */
+  gradientStops?: GradientColorStop[];
+  /** 渐变控制手柄（仅渐变；LINEAR 通常只显式存一个，第二个由轴默认推导） */
+  gradientHandlePositions?: GradientHandlePosition[];
+}
+
+/** 渐变类型 */
+export type GradientType =
+  | "GRADIENT_LINEAR"
+  | "GRADIENT_RADIAL"
+  | "GRADIENT_ANGULAR"
+  | "GRADIENT_DIAMOND";
+
+/** 渐变单个色标：位置 + 颜色 */
+export interface GradientColorStop {
+  position: number;
+  color: NodeColor;
+}
+
+/** 渐变手柄坐标（节点局部 0..1 归一化坐标） */
+export interface GradientHandlePosition {
+  x: number;
+  y: number;
 }
 
 /**
@@ -535,6 +560,121 @@ function buildPaintTable(buf: Buffer): Map<string, PaintEntry> {
     if (refId !== selfId) table.set(refId, entry);
   }
   return table;
+}
+
+/**
+ * 渐变 paint 图元的多色解码（2026-09 破解，火车票 `渐变` 样式两笔渐变逐位命中浏览器真值）。
+ *
+ * 渐变 paint 图元记录格式（与 SOLID 同类，但 `05 <kind>`、`08` 后是渐变数据而非 RGBA）：
+ *       01 <selfId> \0 02 <refId> \0 03 61 <subtype> 00 05 <kind> 08 <gradient>
+ *   - <kind>：1=LINEAR、2=RADIAL（3/4 推测为 ANGULAR/DIAMOND）
+ *   - <gradient>：
+ *       先一个「首色标」颜色（a,r,g,b 4 个紧凑浮点，见下）
+ *       然后 `0a 03 <h0x> <h0y> [04 <h1x> <h1y>]` 控制手柄：
+ *         RAIDAL 显式存两对手柄；LINEAR 只存一对手柄（第二只由轴默认推导，未显式编码）
+ *       再 `05 02 <count>`。
+ *       stop0 = <color(a,r,g,b)> <position>
+ *       其余 stop = 01 <position> 02 <color(a,r,g,b)>
+ *       收尾 `00 06`。
+ *   - 紧凑数字约定：**值为 0 时压缩为单字节 0x00**；非零存 4 字节紧凑浮点（见 decFloat）。
+ *     stop 颜色按 **a,r,g,b** 顺序（实测 LINEAR/RADIAL 均逐位命中真值）。
+ *
+ * 渐变 paint 图元的 refId 就是其所属**样式 id**（实测两笔 refId 均 = "5377:50013"），
+ * 因此本表按 refId（样式 id）聚合该样式下所有渐变 paint。
+ *
+ * 注意：buildPaintTable 也会误扫到 kind===RADIAL 的渐变记录（subtype=0x30）并解出错误 RGBA，
+ * 调用方须**优先查本表**判定渐变，再退回 buildPaintTable 查 SOLID。
+ */
+function buildGradientTable(buf: Buffer): Map<string, NodePaint[]> {
+  const table = new Map<string, NodePaint[]>();
+  for (let i = 0; i + 7 < buf.length; i++) {
+    if (buf[i] !== 0x03 || buf[i + 1] !== 0x61) continue;
+    const sub = buf[i + 2];
+    if (sub < 0x30 || sub > 0x33 || buf[i + 3] !== 0x00) continue;
+    if (buf[i + 4] !== 0x05) continue;
+    const kind = buf[i + 5];
+    if (kind < 1 || kind > 4) continue;
+    if (buf[i + 6] !== 0x08) continue;
+    const start08 = i + 6;
+    // 回溯 `01 <selfId>\0 02 <refId>\0`，要求 refId 结束正好指着 anchor（03）
+    let selfId: string | null = null;
+    let refId: string | null = null;
+    for (let j = i - 1; j >= Math.max(0, i - 100); j--) {
+      if (buf[j] !== 0x01) continue;
+      const ca = readCstr(buf, j + 1);
+      if (!ca || !PAINT_ID_RE.test(ca.s)) continue;
+      if (buf[ca.next] !== 0x02) continue;
+      const cb = readCstr(buf, ca.next + 1);
+      if (!cb || !PAINT_ID_RE.test(cb.s) || cb.next !== i) continue;
+      selfId = ca.s;
+      refId = cb.s;
+      break;
+    }
+    if (!selfId || !refId) continue;
+    const g = parseGradientAt(buf, start08);
+    if (!g) continue;
+    const type = (["GRADIENT_LINEAR", "GRADIENT_RADIAL", "GRADIENT_ANGULAR", "GRADIENT_DIAMOND"] as GradientType[])[kind - 1];
+    const paint: NodePaint = { refId, kind: "GRADIENT", color: null, type, ...g };
+    const arr = table.get(refId) ?? [];
+    arr.push(paint);
+    table.set(refId, arr);
+  }
+  return table;
+}
+
+/** 状态化读取：数字可为单字节 0 或 4 字节紧凑浮点 */
+function readGradNum(buf: Buffer, state: { p: number }): number {
+  const b = buf[state.p];
+  if (b >= 0x60 && b <= 0xa0) {
+    const v = decFloat(buf, state.p);
+    state.p += 4;
+    return v;
+  }
+  state.p += 1;
+  return b;
+}
+
+/** 读取一个 stop 颜色（a,r,g,b 顺序） */
+function readGradColor(buf: Buffer, state: { p: number }): NodeColor {
+  const a = readGradNum(buf, state);
+  const r = readGradNum(buf, state);
+  const g = readGradNum(buf, state);
+  const b = readGradNum(buf, state);
+  return { r, g, b, a };
+}
+
+/**
+ * 解析 `08` 之后的渐变数据块。返回 null 表示解析失败（结构不符）。
+ * 仅提取 stops 与 handles（isVisible/alpha/blendMode 未在渐变块内显式编码，不输出）。
+ */
+function parseGradientAt(buf: Buffer, start08: number): {
+  gradientStops: GradientColorStop[];
+  gradientHandlePositions: GradientHandlePosition[];
+} | null {
+  const state = { p: start08 + 1 };
+  readGradColor(buf, state); // 首色标颜色（stop0，位置 0）
+  state.p += 2; // 0a 03
+  const h0 = { x: readGradNum(buf, state), y: readGradNum(buf, state) };
+  const handles: GradientHandlePosition[] = [h0];
+  if (buf[state.p] === 0x04) {
+    state.p += 1;
+    handles.push({ x: readGradNum(buf, state), y: readGradNum(buf, state) });
+  }
+  state.p += 2; // 05 02
+  const count = buf[state.p];
+  state.p += 1;
+  if (count < 1 || count > 32) return null;
+  const stops: GradientColorStop[] = [];
+  { const color = readGradColor(buf, state); stops.push({ position: readGradNum(buf, state), color }); }
+  for (let i = 1; i < count; i++) {
+    if (buf[state.p] !== 0x01) return null;
+    state.p += 1;
+    const position = readGradNum(buf, state);
+    if (buf[state.p] !== 0x02) return null;
+    state.p += 1;
+    stops.push({ position, color: readGradColor(buf, state) });
+  }
+  return { gradientStops: stops, gradientHandlePositions: handles };
 }
 
 /**
@@ -1063,21 +1203,23 @@ export interface PaintStyle {
  */
 export function listLocalPaintStyles(buf: Buffer, fileId: string): PaintStyle[] {
   const paintMap = buildPaintTable(buf);
+  const gradientMap = buildGradientTable(buf);
   const styles: PaintStyle[] = [];
 
   for (const rec of scanStyleIndex(buf, fileId)) {
     if (rec.kind !== "PAINT" || rec.isExternal) continue;
-    // 查 paint 定义表：SOLID 样式的 selfId 即 paint 表条目的 refId，
-    // buildPaintTable 已建 selfId+refId 双索引，可直接查 selfId 拿 RGBA。
-    const entry = paintMap.get(rec.id);
-    const kind: NodePaint["kind"] = entry ? entry.kind : "GRADIENT";
-    const paints: NodePaint[] = [
-      {
-        refId: rec.id,
-        kind,
-        color: entry ? entry.color : null,
-      },
-    ];
+    // 渐变优先：样式 id 对应渐变 paint 图元的 refId，直接带出 stops/type/handles。
+    const grads = gradientMap.get(rec.id);
+    const paints: NodePaint[] = grads && grads.length ? grads : (() => {
+      const entry = paintMap.get(rec.id);
+      return [
+        {
+          refId: rec.id,
+          kind: entry ? entry.kind : "GRADIENT",
+          color: entry ? entry.color : null,
+        },
+      ];
+    })();
     styles.push({
       id: rec.id,
       name: rec.name,

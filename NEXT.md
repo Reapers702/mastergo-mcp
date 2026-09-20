@@ -107,9 +107,11 @@
 - **另需取样**：`offsetX` / `spread` / `type`（INNER_SHADOW / LAYER_BLUR / BACKGROUND_BLUR）
   在现有素材中**全部是默认值**，无从验证。
 
-### 5. 渐变样式的 stops 多色解码
-- 真值已拿到（`gradientStops` 含 position + RGBA、`gradientHandlePositions`、`transform`、`type`），
-  但二进制里渐变 paint 的多色 stops 尚未定位。现有实现只标记 `kind`，`color` 为 `null`。
+### 5. 渐变样式的 stops 多色解码 —— ✅ 已完成（2026-09）
+- 真值（`gradientStops` 含 position + RGBA、`gradientHandlePositions`、`transform`、`type`）已拿到并存盘 `.cache/gradient_truth.json`。
+- 编码已破解并落地 `buildGradientTable` / `parseGradientAt`（见 README Roadmap）：渐变 paint 图元 `… 03 61 <sub> 00 05 <kind> 08 …`，`<kind>` 判别类型（1=LINEAR/2=RADIAL），`08` 后多色 stops + 手柄；紧凑数字 **0 压成单字节 0x00、非 0 用 4 字节浮点**；stop 颜色 **a,r,g,b** 顺序。渐变 paint 的 refId=所属样式 id，按 refId 聚合。
+- 实测火车票 `渐变` 样式（`5377:50013`）两笔渐变（`5377:50015` LINEAR / `5377:50014` RADIAL）的 **stops/handles 与浏览器真值逐位一致**；其余 3 个 SOLID 样式不受影响；回归 828/828 + 样式基线 4 条通过。
+- **已知局限**：LINEAR 渐变在二进制只显式存**一个**手柄（第二个由轴默认推导，未编码），故 `gradientHandlePositions` 对 LINEAR 仅 1 项（真值为 2）。`isVisible/alpha/blendMode` 未在渐变块内显式编码，不输出。`transform` 由手柄/几何推导，未解码。
 
 ---
 
