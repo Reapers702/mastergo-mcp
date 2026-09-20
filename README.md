@@ -163,6 +163,7 @@ src/
     - **顺序规则（关键）**：同一效果样式的多条效果项物理上**分散**在多个 `01 <effectId>` 定义记录里，且字节序与浏览器 API 真值**不一致**；需按每条 `01 <effectId>` 的**数字后缀降序**排序后才与真值完全对齐（antd5 34/34、90/90 项验证）。
     - **缺省规律（2026-09 破析）**：legacy 下 `09`/`0b` 会**整字段缺省**且缺省**不等于 0**，但 antd5（modern 编码）34 个效果样式 90 个效果项**全部含 09/0a/0b/0f**、无缺省反例 —— 说明缺省是 legacy 旧编码的历史行为。现按「字段出现则取值、未出现输出 null」处理。
   - **文字样式子块**（`05 03` 之后）：`02 <3B 字体族 id> 03 <字体名>\0 04 <紧凑浮点 fontSize> 05 <紧凑浮点 lineHeight> 06 <1B> 0b <1B> 0c <PostScript 名>\0 0e <紧凑浮点 fontSize×1.2> 0f <字体 hash>\0`。`0e` 恒为 fontSize×1.2（12→14、16→19、20→24、40→48 全部验证通过）。`06`/`0b` 在 13 个样式中恒为 `01`（对应 textCase=ORIGINAL），枚举语义无从取样故不输出。
+    - **modern 布局（antd5 等，2026-09 破析）**：`03 <字体名>\0 04 <紧凑浮点 fontSize> [08 <紧凑浮点 letterSpacing>] 0c <PostScript 名>\0 12 <json 字体元数据>\0 13 <8B> …`。新增 `08`=**字间距**（**仅非 0 时出现**，0 则整字段缺省；单样本 `08 83 00 00 e0`=30 与浏览器真值一致，单位 PERCENT）。`08`/`12`/`13` 已纳入 `parseTextStyleBody`；modern 样式仅反解出 fontSize/字体/letterSpacing，lineHeight/hash 在该布局缺省。
     - ⚠️ 输出的 `fontName.family` 由 PostScript 名按最后一个 `-` 拆分，可能是**压缩形式**（二进制存 `OpenSans`，真值 API 返回 `Open Sans`）；需要精确字体名请用 `fontPostScriptName`。
   - 渐变样式（GRADIENT_LINEAR/RADIAL）已破解（2026-09）：渐变 paint 图元 `01 <selfId>\0 02 <refId>\0 03 61 <sub> 00 05 <kind> 08 …` 中 `<kind>` 判别类型（1=LINEAR、2=RADIAL），`08` 后是多色 stops + 手柄。紧凑数字约定 **0 值压成单字节 0x00、非 0 用 4 字节紧凑浮点**；stop 颜色按 **a,r,g,b** 顺序；stop0=`<color><position>`、其余= `01 <position> 02 <color>`；手柄 `0a 03 <h0> [04 <h1>]`（RADIAL 存两对、LINEAR 只存一对，第二个由轴默认推导未编码）。渐变 paint 的 refId 即所属样式 id，故按 refId 聚合到该样式。实测火车票 `渐变` 样式两笔渐变的 stops/handles 与浏览器真值**逐位一致**。
 - [x] **变量（Variables）**：已交付 `list_variables`，实测 **57/57** 条 id/name/type 与浏览器 `variables.getVariables()` 真值一致。
@@ -209,9 +210,10 @@ src/
   - 文字样式**不是**独立的一张表，而是与颜色/效果样式、变量**共用同一张「样式索引表」**，靠记录内的 `05 <n>` 判别类型（`3` = TEXT）。
   - 旧推测「`03 61 <subtype>` 的 subtype 就是类型」**是错的**：`03 61 <c>` 只是序号 —— 同为 PAINT 的样式 c 各不相同（Purple=aL、Yellow=a1、Success=aF）。
   - 火车票文件确实 0 个文字样式，但**新编码文件里有**；旧编码下 `04 <desc>` / `06 01` 可整体缺省，锚点需容忍。
-- **文字样式子块**（`05 03` 之后）：
+- **文字样式子块**（`05 03` 之后，**legacy**）：
   `02 <3B 字体族 id> 03 <字体名>\0 04 <紧凑浮点 fontSize> 05 <紧凑浮点 lineHeight> 06 <1B> 0b <1B> 0c <PostScript 名>\0 0e <紧凑浮点 fontSize×1.2> 0f <字体 hash>\0`
-- **仍未解出**：`textCase` / `decoration` / `letterSpacing` —— 现有 13 个样式里这三个字段**全是同一个值**（ORIGINAL / NONE / 0），无法验证枚举语义。要继续需取样一个**含多种 textCase（UPPER/LOWER/TITLE）且 letterSpacing 非 0** 的设计稿。
+- **modern 子块（antd5 等，2026-09）**：`03 字体名 04 fontSize [08 紧凑浮点 letterSpacing] 0c PostScript 12 json 13 (8B)`，`08` 字间距仅非 0 时出现。已在 antd5 可编辑文件取样：编辑器把字间距改 0%→30% 后 `createTextStyle` 建样式，反解 `08 83 00 00 e0`=30 ✓。
+- **仍未解出**：`textCase` / `decoration` 枚举语义 —— 现有所有样式两个字段**全是同一个值**（ORIGINAL / NONE），无法验证枚举语义；`createTextStyle` 的 textCase/decor 参数被忽略、编辑器控件自动化难以稳定命中，故未取样到非默认值。textCase 相关字节 `06`/`0b` 恒为 `01`。
 
 ### ③ 效果样式表（Effect Styles）—— ✅ 已完成（2026-09，含已知局限）
 - **已实现**：`list_effect_styles` 工具。**Ant Design 5 文件（antd5，34 样式 / 90 效果项）全量受检**：id/name 逐条一致，color/radius/offsetX/offsetY/type/spread **90/90 项与 `getLocalEffectStyles()` 真值完全一致**（含顺序）。legacy 火车票 6 样式回归仍 PASS。

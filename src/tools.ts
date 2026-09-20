@@ -255,11 +255,11 @@ export function buildTools(): ToolDef[] {
     {
       name: "list_text_styles",
       description:
-        "列出 MasterGo 文件本地文字样式（TEXT）：id、名称、ukey、字体名、字号、行高、字体 hash。" +
+        "列出 MasterGo 文件本地文字样式（TEXT）：id、名称、ukey、字体名、字号、行高、字间距、字体 hash。" +
         "通过浏览器 Cookie 全量下载 /data/{fileKey} 私有二进制，扫描样式索引表中 `05 03` 记录" +
         "（`05 <n>` 是类型判别式：1=颜色样式 / 2=效果样式 / 3=文字样式），" +
         "再解析记录内的文字子块（`03 字体名` / `04 紧凑浮点 fontSize` / `05 紧凑浮点 lineHeight` / " +
-        "`0c PostScript 名` / `0f 字体 hash`）。" +
+        "`0c PostScript 名` / `0f 字体 hash`；modern（antd5 等）另有 `08 紧凑浮点 letterSpacing`，仅非 0 时出现）。" +
         "实测（2026-09 移动端界面设计）：13/13 条 id/name/fontSize/lineHeight 与浏览器 " +
         "getLocalTextStyles() 真值完全一致。" +
         "⚠️ fontName 的 family 由 PostScript 名按最后一个 `-` 拆分，可能是**压缩形式**" +

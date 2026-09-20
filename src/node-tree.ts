@@ -1397,6 +1397,11 @@ export interface TextStyle {
   fontPostScriptName: string | null;
   fontSize: number | null;
   lineHeight: { value: number; unit: "PIXELS" } | null;
+  /**
+   * 字间距。现代（antd5 等）编码用 `08 <紧凑浮点>`，仅为非 0 时才显式出现；
+   * 单位按单样本（=30）验证为 PERCENT。legacy 编码暂未取样，恒为 null。
+   */
+  letterSpacing: { value: number; unit: "PERCENT" | "PIXELS" } | null;
   /** 字体文件 hash（16 字节 hex），同一字体族/字重的稳定标识 */
   fontHash: string | null;
 }
@@ -1411,11 +1416,13 @@ function splitFontName(ps: string): { family: string; style: string } {
 /**
  * 解析 `05 03` 文字样式子块。
  *
- * 子块字段（实测 13/13 与浏览器 `getLocalTextStyles()` 真值一致）：
+ * 子块字段（legacy，13/13 与浏览器 `getLocalTextStyles()` 真值一致）：
  *   `02 <3B 字体族 id> 03 <字体名> \0 04 <紧凑浮点 fontSize> 05 <紧凑浮点 lineHeight>`
  *   `06 <1B textCase> 0b <1B> 0c <PostScript 名> \0 0e <紧凑浮点 fontSize×1.2> 0f <hash> \0`
  *   - `0e` = fontSize × 1.2（Lato 12→14、16→19、20→24、40→48 全部验证通过），是自动行高建议值，不单独输出
  *   - `06`/`0b` 在本文件 13 个样式中恒为 `01`（对应 textCase=ORIGINAL），枚举语义尚未取样，故不输出
+ * modern（antd5 等）为另一布局：`03 <字体名> \0 04 <fontSize> [08 <紧凑浮点 letterSpacing>] 0c <PostScript> \0 12 <json> \0 13 <8B> …`
+ *   - `08`=字间距（紧凑浮点，仅非 0 时出现；样本 30 与浏览器真值一致，单位 PERCENT），已输出为 `letterSpacing`
  */
 function parseTextStyleBody(buf: Buffer, rec: StyleIndexRecord): TextStyle | null {
   let p = rec.bodyPos;
@@ -1425,6 +1432,8 @@ function parseTextStyleBody(buf: Buffer, rec: StyleIndexRecord): TextStyle | nul
   let fontHash: string | null = null;
   let fontSize: number | null = null;
   let lineHeight: number | null = null;
+  /** 字间距（紧凑浮点）。仅在非 0 时显式出现：tag `08`。单位默认 PERCENT（单样本 =30 验证）。 */
+  let letterSpacingValue: number | null = null;
 
   while (p < rec.end) {
     const tag = buf[p];
@@ -1439,6 +1448,18 @@ function parseTextStyleBody(buf: Buffer, rec: StyleIndexRecord): TextStyle | nul
     } else if (tag === 0x05) {
       lineHeight = readCompactFloat(buf, p + 1);
       p += 5;
+    } else if (tag === 0x08) {
+      // modern（antd5）编码：字间距（紧凑浮点；0 时整字段缺省）
+      letterSpacingValue = readCompactFloat(buf, p + 1);
+      p += 5;
+    } else if (tag === 0x12) {
+      // modern 编码：额外字体 JSON 元数据（C 字符串），跳过
+      const s = readCstr(buf, p + 1);
+      if (!s) break;
+      p = s.next;
+    } else if (tag === 0x13) {
+      // modern 编码：固定 8 字节字体记录，跳过
+      p += 8;
     } else if (tag === 0x0e) {
       p += 5;
     } else if (tag === 0x0f) {
@@ -1468,6 +1489,8 @@ function parseTextStyleBody(buf: Buffer, rec: StyleIndexRecord): TextStyle | nul
     fontPostScriptName: postScript,
     fontSize,
     lineHeight: lineHeight === null ? null : { value: lineHeight, unit: "PIXELS" },
+    letterSpacing:
+      letterSpacingValue === null ? null : { value: letterSpacingValue, unit: "PERCENT" },
     fontHash,
   };
 }

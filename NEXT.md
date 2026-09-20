@@ -94,6 +94,15 @@
 - **组件索引表** —— ✅ 已实现 `list_components`（2026-09-20），火车票 96/96 与 `getComponentListVal()` 真值一致，详见 README ④。
 - **节点级渐变 fill** —— ✅ 已完成（2026-09-20）。节点 fill 引用的 `refId` 若命中渐变 paint 表，`get_page_tree` 的 `geometry.fills` 直接输出渐变（`type`/`gradientStops`/`gradientHandlePositions`），不再退回 `UNKNOWN/null`。实测「定稿5：首页火车票卡片」页面 20 个渐变 fill 节点；已加 `test:regress` 守卫（`checkNodeGradFills`）。
 
+### 6. 文字样式的 letterSpacing（modern 编码）—— ✅ 已完成（2026-09）
+- 用可编辑 antd5 文件（fileId `204971164239455`）取样：经编辑器把选中文字的**字间距**从 0% 改成 30%
+  后，`createTextStyle({id:该文字层, name})` 建出带该属性的**文字样式**，再下载 `/data` 反解。
+- 破析：modern 文字样式子块为 `03 字体名 04 fontSize [08 紧凑浮点 letterSpacing] 0c PostScript 12 json 13 (8B) …`，
+  **`08` 即字间距紧凑浮点，仅非 0 时才出现**（0 则整字段缺省）。样本 `08 83 00 00 e0` = 30 ✓（与浏览器真值一致）。
+  `08`/`12`/`13` 三个 tag 已补进 `parseTextStyleBody`，顺带修正了 modern 样式 `fontPostScriptName` 的取错（此前会误取成字体族显示名）。
+- **仍缺失**：`textCase` / `decoration` 枚举语义——全部现有样式都只用了 ORIGINAL / NONE，且 `createTextStyle` 的 textCase/decor 参数
+  会被忽略、编辑器里这两个控件自动化难以稳定命中，故未取样到非默认值；`letterSpacing` 的单位仅验证到 PERCENT（单一 % 样本）。
+
 ---
 
 ## P1 · 有真值就能继续做（真值导出已通，门槛只剩「取样」）
@@ -148,7 +157,7 @@
 | modern 的 FRAME / COMPONENT_SET | 返回 `null` | 段内无结构判别式（~1500 样本/类型、220B 窗口 n-gram 搜索无果）；宁可判空不猜错 |
 | COMPONENT_SET vs COMPONENT | 折叠为 COMPONENT | 最优候选判别式精确率仅 79%，会误标 7 个 COMPONENT |
 | 255 条「容器→LINE/RECTANGLE」 | 错判 | 让容器块压过叶子标记精确率仅 55% |
-| 文字样式的 textCase / decoration / letterSpacing | 未输出 | 现有 13 个样式里这三个字段**全是同一个值**（ORIGINAL / NONE / 0），无法验证枚举语义 |
+| 文字样式的 textCase / decoration | 未输出 | 现有全部样式两个字段**全是同一个值**（ORIGINAL / NONE），无法验证枚举语义（`06`/`0b` 恒为 `01`） |
 | 变量 scopes / codeSyntax / 多模式 | 未输出 | 二进制内未定位到 scopes 字段；本文件只有 1 个模式 M:2，多模式无从验证 |
 
 ---
