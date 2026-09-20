@@ -338,6 +338,23 @@ export class MasterGoClient {
     return listLocalVariables(buf, fileId);
   }
 
+  /**
+   * 文件本地组件（COMPONENT，含组件集 COMPONENT_SET）列表。
+   *
+   * 实测认知：MasterGo 的「组件」没有独立编码表，本质是「带自引用 ukey 的容器节点」——
+   * 组件的 id 就是真实图层节点 id。因此本方法通过扫描 /data 二进制节点记录，判定
+   * 几何段内含 `1c 07` 容器块、且该块内含自引用 ukey（`+<selfId>`，无需 fileId 前缀，
+   * 格式无关，legacy/modern 通用）节点即为组件；ukey 前缀用于判定是否本文件（isExternal）。
+   *
+   * @param fileKey UUID，用于拉取 /data 二进制
+   * @param fileId 数字 documentId，用于判定本文件组件
+   */
+  async getLocalComponents(fileKey: string, fileId: string): Promise<any> {
+    const { listLocalComponents } = await import("./node-tree.js");
+    const buf = await this.fetchData(fileKey);
+    return listLocalComponents(buf, fileId);
+  }
+
   // ---- /mcp/* 网关接口已完全移除（不依赖官方 MCP，走纯网页 API 自研） ----
 }
 

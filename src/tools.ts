@@ -2,7 +2,7 @@
  * MCP 工具实现（基于 MasterGo **网页接口**自研，不依赖官方 MCP 网关 /mcp/*）。
  *
  * 认证：浏览器 Cookie（MG_COOKIE）即可；无需付费席位 / 个人访问令牌。
- * 当前已实现（8 个）：
+ * 当前已实现（9 个）：
  *   - get_file_meta：文件元信息（/api/v1/documents/{id}）
  *   - list_pages：页面列表（解析 /data/{fileKey} 私有二进制索引）
  *   - get_file_nodes：全量节点索引（页面 + 全部名节点的 id/名称，可搜索过滤）
@@ -11,7 +11,8 @@
  *   - list_text_styles：文件本地文字样式（TEXT）
  *   - list_effect_styles：文件本地效果样式（EFFECT，阴影/模糊）
  *   - list_variables：文件本地变量（Design Tokens；实测与「样式」是同一批对象）
- * 仍待加入：组件库（COMPONENT/COMPONENT_SET）、图片/切图导出。
+ *   - list_components：文件本地组件（COMPONENT/COMPONENT_SET，无独立编码表，本质是带自引用 ukey 的容器节点）
+ * 仍待加入：图片/切图导出。
  *
  * 样式与变量共用一张「样式索引表」，其类型判别式是记录内的 `05 <n>`：
  * n=1 → PAINT、n=2 → EFFECT、n=3 → TEXT（实测 57/57 纯净）。详见 node-tree.ts。
@@ -344,6 +345,37 @@ export function buildTools(): ToolDef[] {
           fileKey,
           totalVariables: variables.length,
           variables,
+        });
+      },
+    },
+
+    {
+      name: "list_components",
+      description:
+        "列出 MasterGo 文件本地组件（COMPONENT，含组件集 COMPONENT_SET）：id、名称、ukey、isExternal、宽高。" +
+        "⚠️ 实测认知：MasterGo 的「组件」没有独立编码表，本质是「带自引用 ukey 的容器节点」——" +
+        "组件的 id 就是真实图层节点 id。本工具通过浏览器 Cookie 全量下载 /data/{fileKey} 私有二进制，" +
+        "扫描节点记录，判定几何段内含 `1c 07` 容器块、且该块内含自引用 ukey（`+<selfId>`，" +
+        "无需 fileId 前缀，格式无关，legacy/modern 通用）的节点即为组件；" +
+        "ukey 前缀 `<fileId>+<selfId>` 用于判定是否本文件（isExternal=false 是本文件组件）。" +
+        "实测（2026-09 火车票公开文件）：96/96 条 id/name/ukey/width/height 与浏览器 getComponentListVal() " +
+        "真值一致（含组件集内子组件，parentId 记录组件集关系）。" +
+        "参数 file 传文件 ID 或完整 URL。",
+      params: {
+        file: z.string().describe("MasterGo 文件 ID 或完整文件 URL（必填）"),
+      },
+      run: async (client, args) => {
+        const { fileId } = normalize(String(args.file));
+        const meta = await client.getFileMeta(fileId);
+        const fileKey: string | undefined = meta.data?.fileKey;
+        if (!fileKey) throw new MasterGoError("无法获取 fileKey，请检查文件 ID 与访问权限");
+        const components = await client.getLocalComponents(fileKey, fileId);
+        return jsonOut({
+          source: "web-data-component-index",
+          fileId,
+          fileKey,
+          totalComponents: components.length,
+          components,
         });
       },
     },

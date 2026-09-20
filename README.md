@@ -148,8 +148,8 @@ src/
 
 偏差集中在**实例内部节点**（id 含 `/`，其 `1c 07` 块省略布局字段、继承母版，autoLayout 为 null，共 40225 个）与**绑定了设计令牌**的节点（几何段内 `2a {"tokens":...}` 覆盖了内联值）。padding/itemSpacing 的错判高度集中——各字段的 top1 错判都是**同一批 608 个节点**（itemSpacing 二进制 `10`→真值 `0`、paddingTop 二进制 `1`→真值 `6`、paddingRight `3`→`6`…）。
   > **608 节点覆盖来源已定位（2026-09，结论：无可靠二进制判据，不回填）**：这批节点全部是 **DatePicker 组件库实例**（INSTANCE，真值 `fm=VERTICAL`）。它们的**整个布局块**（flexMode/itemSpacing/padding/对齐/sizingMode）与浏览器真值全不一致（仅 cornerRadius=6 正确，对应 `borderRadius` 令牌），且**母版继承与令牌都无法解释**——母版（如 `0:16302`）布局块内容与实例相同而真值也是覆盖值；实例段内 `2a` 令牌仅含 `borderRadius`（不涉及 itemSpacing）。候选判据均失败：全部节点带 `25 02` 标记 + `2a` 令牌，但**正确节点中同样组合有 6288 个**（据此判据召回 608 时的精确率仅 ~9%）。结论：布局值由组件库主题在**客户端渲染层**覆盖，二进制内联的是组件**定义值**、浏览器生效的是**覆盖值**，以现有 `/data` 素材找不到可靠判别依据。按「宁可判空也不猜错」原则**不回填**，维持输出二进制内联值。
-- [x] **组件与样式资源（颜色 / 文字 / 效果样式已完成；组件库未完成）**：三个样式工具已交付，并与浏览器真值**逐条一致** —— 颜色 `list_styles` **38/38**（SOLID 颜色逐值相同）、文字 `list_text_styles` **13/13**（id/name/fontSize/lineHeight 全字段）、效果 `list_effect_styles` **6/6**（color 含 alpha 8/8，radius/offsetY 在有该字段时全对）。
-  - **组件库仍未实现**：真值 144 个组件在二进制里用样式 ukey 锚点 `07 2b <id>` **0 命中**——组件是另一套编码，需另找锚点。**如何继续**：见下节「接手指南 ④」。
+- [x] **组件与样式资源（全部完成）**：颜色/文字/效果样式与组件四个工具已交付，并与浏览器真值**逐条一致**。
+  - **组件库已实现（2026-09-20）**：`list_components` 交付。实测认知：MasterGo 的「组件」**没有独立编码表**，本质是「带自引用 ukey 的容器节点」——组件 id 就是真实图层节点 id（`getComponentListVal()` 的 id 均为真实节点 id）。判据 = 节点几何段内含 `1c 07` 容器块、**且**该块内含自引用 ukey（`+<selfId>\0`，无需 fileId 前缀，格式无关，legacy/modern 通用，零假阳性）；ukey 前缀 `<fileId>+<selfId>` 用于判定是否本文件（`isExternal`）。实测（火车票公开文件）：**96/96** 条 id/name/ukey/width/height 与浏览器 `getComponentListVal()` 真值一致（含组件集内子组件，`parentId` 记录组件集归属）。
   - **样式索引表**（颜色/效果/文字样式与变量**共用同一张表**）记录格式：
     `01 <id>\0 02 <name>\0 03 61 <c>\0 [04 <desc>\0] 05 <n> [子块] 00 00 [06 01] 07 <ukey>\0`
     - **`05 <n>` 才是类型判别式**：`1`=PAINT、`2`=EFFECT、`3`=TEXT（实测 57/57 纯净、零杂音）
@@ -223,16 +223,14 @@ src/
   **如何继续**：打开一个**阴影样式多、且 offsetY/radius 取值分散**的设计稿导真值，观察缺省与哪些字段相关（怀疑与某个「默认值继承」或 `05 <n>` 计数有关）。
 - **另需取样**：`offsetX` / `spread` / `type`（INNER_SHADOW、LAYER_BLUR、BACKGROUND_BLUR）在现有素材中全是默认值，无从验证。
 
-### ④ 组件列表（Components）—— 部分完成（modern 已识别 COMPONENT）
-- **目标字段**：文件组件库里的 `COMPONENT` 定义节点（id、名称、所属 frame）、`INSTANCE` 与 `COMPONENT` 的引用关系、`COMPONENT_SET`。
-- **已完成（modern 格式）**：`decodeModernContainer` 已能判出 `COMPONENT`（几何段含自引用 ukey `<fileId>+<selfId>`）与 `INSTANCE`（`1a <componentId>` 指向已识别组件，两遍解码）。已知取舍：COMPONENT_SET 折叠进 COMPONENT（48 例错判；最优候选判别式精确率仅 79%，故不引入猜测）。
-- **已完成（legacy 格式）**：legacy 文件的 COMPONENT 已补齐识别——legacy 文件中可能嵌入 modern 容器块（组件库/混合格式），`b===0x07 && c===0x01 && hasSelfUkey` 判为 COMPONENT（复用 modern 已验证的零假阳性判据，ukey 机制与容器编码无关）。实测火车票 3 个组件根下共识别出 **87 个 COMPONENT**（如「组件/Checkbox」、星级、状态等），且 PAGE 树回归 828/828 保持、0 错判；误伤面为零（仅当首个 `1c` 是 `1c 07 01` 容器块才检查 ukey，`1c 03` 等叶子不受影响）。
-- **未完成部分（144 个组件在二进制里 0 命中）**：用 `getComponentListVal()` 在「移动端界面设计」导出 **144 个组件**真值，但用样式 ukey 锚点 `07 2b <id>` 在二进制里 **0 命中** —— 组件索引**不带 ukey 字段**，用的是另一套编码（火车票文件里 `115278536821990+<nodeId>` 是以节点记录形式 `03 "<ukey>"\0 04 <紧凑浮点>…` 出现的，共 100 处）。组件真值字段：`id / ukey / name / isExternal / pageId / pageName / parentId / width / height`（**没有 type 字段**，COMPONENT vs COMPONENT_SET 需另判）。
-- **从何入手**：
-  1. 执行 JS 调 `getComponentListVal()` 导出组件 id 真值（含本地/外部标记），**同时把该文件 `/data` 整份存盘**。
-  2. **首选验证 `hasSelfUkey` 是否格式无关**：modern 下「几何段含 `+<selfId>\0`」是 COMPONENT 的精确判据（零假阳性），而 ukey 机制与容器编码无关，legacy 很可能同构。做法：对 legacy 火车票统计「几何段含自引用 ukey」的节点，看它们当前被判成什么——若大量落在 `FRAME`，即命中上述盲区。
-  3. ⚠️ **不要再用「首个 `1c` 块第 2/3 字节试值」的思路**（本节原文的建议）：modern 下容器块统一为 `1c 07 01 01 02 00 …`，试值法完全失效；legacy 下已知值也已用尽。
-- **验证方式**：真值需按「所属根节点」分组、对每个根调 `parsePageTree`（单遍扫描覆盖不到实例内部节点），再逐节点比对。
+### ④ 组件列表（Components）—— ✅ 已完成（2026-09-20）
+- **已实现**：`list_components` 工具交付，按文件返回本地组件（id/name/ukey/isExternal/parentId/pageId/width/height）。
+- **核心认知（推翻本节旧推测）**：MasterGo 的「组件」**没有独立编码表**，本质是「**带自引用 ukey 的容器节点**」——组件 id 就是真实图层节点 id（`getComponentListVal()` 返回的 id 在 `get_file_nodes` 全量节点里都能找到）。因此**无需专门的索引表**，直接扫节点树即可。
+- **判据（已验证格式无关，legacy/modern 通用）**：节点几何段内含 `1c 07` 容器块，且该块内含自引用 ukey `+<selfId>\0`（**零假阳性**）。注意不能复用 `findContainerBlock`（它硬编码 `1c 07 01` modern 语义，组件容器的第 3 字节可为 01/03/09/0a），须在组件扫描内独立找 `1c 07`。
+- **isExternal 判定**：读 ukey 前缀 —— 新编码只存 `+<selfId>`（本文件）、旧编码存 `<fileId>+<selfId>`（比较 fileId 是否等于当前文件）。
+- **实测（2026-09 火车票公开文件）**：**96/96** 条 id/name/ukey/width/height 与浏览器 `getComponentListVal()` 真值一致（含组件集 COMPONENT_SET 内子组件，`parentId` 记录其归属组件集）。
+- **已验证的连带能力**：`decodeModernContainer` / `get_page_tree` 里的 COMPONENT（几何段含 ukey）与 INSTANCE（`1a <componentId>` 指向已识别组件）识别；legacy 文件的 COMPONENT 识别（`b===0x07 && c===0x01 && hasSelfUkey`，复用零假阳性判据，火车票识别出 87 个 COMPONENT）。
+- **未做 / 仍无可靠判据**：COMPONENT vs COMPONENT_SET 的二值判别（最优候选判别式精确率仅 79%，故 `list_components` 与 `get_page_tree` 均不区分、按「宁可判空不猜错」原则折叠为 COMPONENT）；组件封面图 / cover、description 未导出。
 
 ### ⑤ 变量（Variables / Design Tokens）—— ✅ 已完成（2026-09）
 - **已实现**：`list_variables` 工具。实测 **57/57** 条 id/name/type 与浏览器 `variables.getVariables()` 真值一致。

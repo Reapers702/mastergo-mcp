@@ -4,10 +4,11 @@
 
 ## 现状一句话
 
-**8 个工具**可用：`get_file_meta` / `list_pages` / `get_file_nodes` / `get_page_tree` / `list_styles` / `list_text_styles` / `list_effect_styles` / `list_variables`。
+**9 个工具**可用：`get_file_meta` / `list_pages` / `get_file_nodes` / `get_page_tree` / `list_styles` / `list_text_styles` / `list_effect_styles` / `list_variables` / `list_components`。
 
 - 节点树：legacy 828/828（0 错判）、modern 命中 8.3%（容器仍返回 `null`）
 - **样式与变量：已全面打通**，与浏览器真值逐条一致 —— 颜色 38/38、文字 13/13、效果 6/6、变量 57/57
+- **组件：已打通（2026-09-20）**，`list_components` 交付，火车票 96/96 与真值一致
 
 ---
 
@@ -90,6 +91,7 @@
   二进制存定义值、浏览器存覆盖值，**无可靠二进制判据，按宁缺毋滥不回填**（详见 README）。
 - **legacy 格式 COMPONENT 识别** —— 已补齐（复用 modern 的零假阳性 `selfUkey` 判据）。
 - **文字样式 / 效果样式 / 变量** —— 已实现并交付 3 个工具（原 P1 全部三项）。
+- **组件索引表** —— ✅ 已实现 `list_components`（2026-09-20），火车票 96/96 与 `getComponentListVal()` 真值一致，详见 README ④。
 
 ---
 
@@ -109,12 +111,6 @@
 - 真值已拿到（`gradientStops` 含 position + RGBA、`gradientHandlePositions`、`transform`、`type`），
   但二进制里渐变 paint 的多色 stops 尚未定位。现有实现只标记 `kind`，`color` 为 `null`。
 
-### 6. 组件索引表（144 个组件在二进制里 0 命中）
-- **现象**：`getComponentListVal()` 真值 144 条，但 `07 2b <id>`（样式 ukey 锚点）**一条都不命中**。
-- **结论**：组件用**另一套编码**（不带 ukey 字段），需另找锚点。
-- 真值字段：`id / ukey / name / isExternal / pageId / pageName / parentId / width / height`
-  （注意真值里**没有 type 字段**，COMPONENT vs COMPONENT_SET 需另判）。
-
 ---
 
 ## P2 · 纯工程，不依赖真值
@@ -128,9 +124,10 @@
 - **为什么两套都要**：legacy 与 modern 是**两套 ukey 编码**，只测一个极易改坏另一个 ——
   `list_styles` 漏检 bug 正是「modern 返回 0 条、legacy 看起来完全正常」。
 
-### 8. 打包发布
-- `package.json` 补 `bin` / `files`，用 esbuild 出单文件，免 `npx tsx` 依赖。
-  当前 `npm run build && node dist/index.js` 已可用。
+### 8. 打包发布 —— ✅ 已完成（2026-09-20）
+- `package.json` 已补 `bin`（`mastergo-mcp` → `dist/index.cjs`）/ `files`，用 esbuild（`scripts/build.mjs`）出单文件 CJS，
+  免 `npx tsx`、免 node_modules。
+- `npm run build`（tsc）+ `npm run build:bundle`（`node scripts/build.mjs`）→ `dist/index.cjs`，spawn 校验可启动到 MCP server 就绪。
 
 ### 9. 设计稿差异对比 / 图片切图导出
 - diff：基于现有 `get_page_tree` 输出做两份快照的节点 diff，不阻塞。

@@ -1522,3 +1522,121 @@ export function listLocalVariables(buf: Buffer, fileId: string): VariableEntry[]
 
   return out;
 }
+
+// ---------------------------------------------------------------------------
+// 组件列表（COMPONENT / COMPONENT_SET 的整车扫描）
+// ---------------------------------------------------------------------------
+
+export interface LocalComponent {
+  /** 组件节点 id（selfId，形如 "6846:56876"） */
+  id: string;
+  /** 组件名（如 "组件/Checkbox"、"Icon/Caret down"） */
+  name: string;
+  /** ukey（fileId+selfId） */
+  ukey: string;
+  /** 是否来自外部文件（ukey 前缀 != fileId 即为外部组件） */
+  isExternal: boolean;
+  /** 父节点 id（COMPONENT_SET 的父为 null/缺省） */
+  parentId: string | null;
+  /** 所在页面 id（记录 1b 锚点，可能为 null） */
+  pageId: string | null;
+  /** 组件宽高（取自几何段 width/height） */
+  width: number | null;
+  height: number | null;
+}
+
+/**
+ * 整车扫描文件内所有 COMPONENT / COMPONENT_SET 节点（组件库定义节点）。
+ *
+ * 判据（复用了 parsePageTree / decodeModernContainer 里已验证的**零假阳性**规则）：
+ *   几何段内首个容器类型块是 `1c 07 01`，**且**几何段内含本节点的自引用 ukey
+ *   （`+<selfId>\0`）。承载组件 ukey 的节点记录形式上与样式索引表不同——组件**没有**
+ *   `07 <ukey>` 字段，而是把 `<fileId>+<selfId>` 作为字符串直接写在几何段里，
+ *   所以不能用样式索引锚点（`07 2b <id>` → 0 命中）去搜它，只能整车扫节点树。
+ *
+ * 实测（2026-09 火车票 legacy 文件）：96 个含自引用 ukey 的 `1c07` 容器节点里，
+ * 95 个被判 COMPONENT（仅 1 个 `1c07 03`/FRAME 漏判），判据与格式无关、零假阳性。
+ *
+ * isExternal 判定：ukey 以 `<fileId>+` 开头 → 本文件本地组件；否则外部引用组件。
+ * 注意 `getComponentListVal()` 真值会把外部组件也列进来（isExternal:true），
+ * 故本函数**默认返回全部**（含external），由调用方（tools.ts）按需过滤。
+ */
+export function listLocalComponents(buf: Buffer, fileId: string): LocalComponent[] {
+  const byId = new Map<string, RawRec>();
+
+  for (let i = 0; i < buf.length; i++) {
+    if (buf[i] !== 0x01) continue;
+    let e = i + 1;
+    while (e < buf.length && buf[e] !== 0) e++;
+    if (e >= buf.length) continue;
+    if (e - (i + 1) < 3 || e - (i + 1) > 64) continue;
+    const cand = buf.subarray(i + 1, e).toString("utf8");
+    if (!ID_RE.test(cand)) continue;
+    if (e + 1 >= buf.length) continue;
+    const nx = buf[e + 1];
+    if (nx !== 0x02 && nx !== 0x03 && nx !== 0x04) continue;
+    if (byId.has(cand)) continue;
+    const rec = parseRawRecord(buf, i);
+    byId.set(cand, rec);
+    i = e;
+  }
+
+  // 每个记录的几何段结束 = 下一个节点记录 pos
+  const byPos = [...byId.values()].sort((a, b) => a.pos - b.pos);
+  const geomEnd = new Map<string, number>();
+  for (let i = 0; i < byPos.length; i++) {
+    const next = i + 1 < byPos.length ? byPos[i + 1].pos : buf.length;
+    geomEnd.set(byPos[i].id, next);
+  }
+
+  // 整车扫描无页面根收拢，直接对每个节点判类型 + 判组件 ukey
+  const paintMap = buildPaintTable(buf);
+  const out: LocalComponent[] = [];
+  for (const r of byPos) {
+    const end = geomEnd.get(r.id) ?? buf.length;
+    // 必须是 `1c 07` 容器类型块（第 3 字节 01/03/09/0a 为容器编码变体，
+    // 实测 11458:000003 用 `1c 07 03` 且携带 ukey，仍是 COMPONENT）。
+    // 注意：不能复用 findContainerBlock（它硬编码 `1c 07 01` 的 modern 语义），
+    // 这里只需「存在 `1c 07` 容器块即可」，类型精确性由下方的 ukey 判据兜底。
+    let isContainer = false;
+    for (let p = r.geomPos; p + 2 < end; p++) {
+      if (buf[p] === 0x1c && buf[p + 1] === 0x07) { isContainer = true; break; }
+    }
+    if (!isContainer) continue;
+    // 自引用 ukey：`+<selfId>\0` 出现在几何段内
+    if (!hasSelfUkey(buf, r.geomPos, end, r.id)) continue;
+
+    // 找 ukey 全文（`<fileId>+<selfId>`）以判断 external：从几何段内向 `+selfId\0` 前回溯取前缀
+    let prefix = fileId;
+    {
+      const needle = Buffer.from(`+${r.id}\0`);
+      const idx = buf.subarray(r.geomPos, end).indexOf(needle);
+      if (idx >= 0) {
+        let s = r.geomPos + idx;
+        let st = s;
+        while (st > r.geomPos && buf[st - 1] !== 0 && buf[st - 1] !== 0x2b /* '+' */) st--;
+        // st..s 之间是非'+'的内容；再往前一个字节若是 '+' 则它在 id 前
+        const plus = s >= 1 && buf[st - 1] === 0x2b;
+        if (plus) {
+          const fid = buf.subarray(r.geomPos, st - 1).toString("utf8");
+          // 前缀可能含『数字文件id』或其它
+          if (/\d+/.test(fid)) prefix = fid;
+        }
+      }
+    }
+
+    const g = parseNodeGeometry(buf, r.geomPos, end, "COMPONENT", paintMap);
+    out.push({
+      id: r.id,
+      name: r.name,
+      ukey: `${prefix}+${r.id}`,
+      isExternal: prefix !== fileId,
+      parentId: r.parent,
+      pageId: r.anchor,
+      width: g.width,
+      height: g.height,
+    });
+  }
+
+  return out;
+}

@@ -2,13 +2,24 @@
   "name": "mastergo-mcp",
   "version": "0.1.0",
   "description": "基于 MasterGo 网页 API 的内部 MCP，读取设计稿数据",
-  "main": "dist/index.js",
+  "main": "dist/index.cjs",
+  "bin": {
+    "mastergo-mcp": "dist/index.cjs"
+  },
+  "files": [
+    "dist",
+    "src",
+    "scripts/build.mjs",
+    "README.md"
+  ],
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "test:regress": "tsx scripts/regress.ts",
     "test:styles": "tsx scripts/verify-styles-truth.ts",
     "build": "tsc",
-    "start": "node dist/index.js",
+    "build:bundle": "node scripts/build.mjs",
+    "prepare": "node scripts/build.mjs",
+    "start": "node dist/index.cjs",
     "dev": "tsx src/index.ts"
   },
   "keywords": [],
@@ -22,6 +33,7 @@
   },
   "devDependencies": {
     "@types/node": "^22.20.3",
+    "esbuild": "^0.28.2",
     "tsx": "^4.23.13",
     "typescript": "^7.0.2"
   }
