@@ -205,6 +205,13 @@ export interface PageTree {
 /** 匹配节点 id：形如 10371:87078 或 10371:89225/1:20691 */
 const ID_RE = /^\d+:\d+(?:\/\d+:\d+)*$/;
 
+/**
+ * 更宽松的 id 校验，用于 **paint 定义表**：MasterGo 的 paint 图元 id 可以省略数字前缀，
+ * 甚至整个 id 只有冒号本身（实测新文件「移动端界面设计」里同时存在 `:005` 与 `":"` 两种），
+ * 用严格的 ID_RE 会把它们整条跳过，导致样式颜色全部解成 null。
+ */
+const PAINT_ID_RE = /^\d*:[0-9A-Za-z]*$/;
+
 /** 从 p 起读取一个以 \0 结尾的 UTF-8 字符串 */
 function readCstr(buf: Buffer, p: number): { s: string; next: number } | null {
   if (p < 0 || p >= buf.length) return null;
@@ -499,10 +506,11 @@ function buildPaintTable(buf: Buffer): Map<string, PaintEntry> {
     for (let j = i - 1; j >= Math.max(0, i - 100); j--) {
       if (buf[j] !== 0x01) continue;
       const ca = readCstr(buf, j + 1);
-      if (!ca || !ID_RE.test(ca.s)) continue;
+      // paint 图元 id 可能是 `:005` 形式（无数字前缀），故此处用宽松校验
+      if (!ca || !PAINT_ID_RE.test(ca.s)) continue;
       if (buf[ca.next] !== 0x02) continue;
       const cb = readCstr(buf, ca.next + 1);
-      if (!cb || !ID_RE.test(cb.s) || cb.next !== i) continue;
+      if (!cb || !PAINT_ID_RE.test(cb.s) || cb.next !== i) continue;
       selfId = ca.s;
       refId = cb.s;
       break;
@@ -1055,56 +1063,462 @@ export interface PaintStyle {
  */
 export function listLocalPaintStyles(buf: Buffer, fileId: string): PaintStyle[] {
   const paintMap = buildPaintTable(buf);
-  const prefix = fileId + "+";
   const styles: PaintStyle[] = [];
 
-  for (let i = 0; i + 11 < buf.length; i++) {
+  for (const rec of scanStyleIndex(buf, fileId)) {
+    if (rec.kind !== "PAINT" || rec.isExternal) continue;
+    // 查 paint 定义表：SOLID 样式的 selfId 即 paint 表条目的 refId，
+    // buildPaintTable 已建 selfId+refId 双索引，可直接查 selfId 拿 RGBA。
+    const entry = paintMap.get(rec.id);
+    const kind: NodePaint["kind"] = entry ? entry.kind : "GRADIENT";
+    const paints: NodePaint[] = [
+      {
+        refId: rec.id,
+        kind,
+        color: entry ? entry.color : null,
+      },
+    ];
+    styles.push({
+      id: rec.id,
+      name: rec.name,
+      type: "PAINT",
+      collectionId: "M:1",
+      collectionName: "集合",
+      ukey: rec.ukey,
+      isExternal: false,
+      paints,
+    });
+  }
+  return styles;
+}
+
+// ============================================================================
+// 样式索引表（颜色 / 效果 / 文字样式 —— 与「变量」是同一张表）
+// ============================================================================
+
+/**
+ * 样式索引记录的种类。判别式是记录内的 `05 <n>` 字段（实测 57/57 纯净、零杂音）：
+ *   n=1 → PAINT（颜色样式）、n=2 → EFFECT（效果样式）、n=3 → TEXT（文字样式）。
+ *
+ * 注意：记录里的 `03 61 <c>`（如 a0/a1/aL）**不是**类型判别式——同一类型的 c 各不相同
+ * （Purple=aL、Yellow=a1、Success=aF 同为 PAINT），它只是一个序号，切勿据此判类型。
+ */
+export type StyleKind = "PAINT" | "EFFECT" | "TEXT";
+
+const STYLE_KIND_BY_N: Record<number, StyleKind> = { 1: "PAINT", 2: "EFFECT", 3: "TEXT" };
+
+/**
+ * 一条样式索引记录。
+ *
+ * 记录格式（两套编码并存，差异只在 ukey 与可选的 `06 01`）：
+ *   `01 <id> \0 02 <name> \0 03 61 <c> \0 04 <desc> \0 05 <n> [子块] 00 00 [06 01] 07 <ukey> \0`
+ *   - 新编码（移动端界面设计，实测 57/57 命中）：ukey 只存 `+<selfId>`，**不含 fileId 前缀**
+ *   - 旧编码（火车票）：ukey 存 `<fileId>+<selfId>`，且 `05` 块后多一个 `06 01`
+ *
+ * 本文件判定**不能**只靠 `ukey.startsWith(fileId + "+")`（旧实现的缺陷：新编码下必然 0 命中）。
+ * 规则：ukey 形如 `+<id>`（无 fileId 前缀）视为本文件；形如 `<fid>+<id>` 则比较 fid。
+ */
+export interface StyleIndexRecord {
+  /** 样式 id（selfId） */
+  id: string;
+  /** 样式名 */
+  name: string;
+  /** 由 `05 <n>` 判出的种类 */
+  kind: StyleKind;
+  /** ukey：新编码 `+<id>`，旧编码 `<fileId>+<id>` */
+  ukey: string;
+  /** 是否来自其他文件（团队库/外部引用） */
+  isExternal: boolean;
+  /** 描述文本 */
+  description: string;
+  /** `05 <n>` 子块起点（文字样式的字段区从这里开始） */
+  bodyPos: number;
+  /** ukey 字段结束位置 */
+  end: number;
+}
+
+/** ukey 形如 `<fileId>+<selfId>` 或 `+<selfId>`（新编码省略 fileId）。 */
+const UKEY_RE = /^([0-9]*)\+([0-9]+:[0-9A-Za-z]+)$/;
+
+/**
+ * 扫描二进制中的全部样式索引记录（颜色/效果/文字样式与变量共用此表）。
+ *
+ * 锚点：`03 61 <c> 00 04`（类型块 + 描述字段），随后校验 `05 <n>` 合法、
+ * 且窗口内存在合法 ukey 字段 `07 <ukey> \0` —— 后者是样式记录独有的，
+ * 用于排除大量形似的节点记录（实测无 ukey 过滤时新文件匹配 225 条，加过滤后恰为 57 条真值）。
+ */
+function scanStyleIndex(buf: Buffer, fileId: string): StyleIndexRecord[] {
+  const out: StyleIndexRecord[] = [];
+
+  for (let i = 0; i + 8 < buf.length; i++) {
     if (!(buf[i] === 0x03 && buf[i + 1] === 0x61 && buf[i + 3] === 0x00)) continue;
-    let p = i + 4;
-    if (buf[p] === 0x04 && buf[p + 1] === 0x00) p += 2;
-    if (
-      !(buf[p] === 0x05 && buf[p + 1] === 0x01 && buf[p + 2] === 0x00 &&
-        buf[p + 3] === 0x00 && buf[p + 4] === 0x06 && buf[p + 5] === 0x01 && buf[p + 6] === 0x07)
-    ) continue;
-    // 回溯找 01 <id>\0 02 <name>\0
-    let selfId: string | null = null;
+    // `04 <desc>` 在旧编码里可能整体省略（火车票部分记录直接 `03 61 XX 00 05 …`），故为可选
+    let p05 = i + 4;
+    let descText = "";
+    if (buf[p05] === 0x04) {
+      const d = readCstr(buf, p05 + 1);
+      if (!d) continue;
+      descText = d.s;
+      p05 = d.next;
+    }
+    if (buf[p05] !== 0x05) continue;
+    const kind = STYLE_KIND_BY_N[buf[p05 + 1]];
+    if (!kind) continue;
+
+    // 在 `05` 之后的窗口内找 ukey 字段（子块长度可变，故用搜索而非定长跳过）
+    let uk: { s: string; next: number } | null = null;
+    const lim = Math.min(p05 + 600, buf.length - 1);
+    for (let k = p05 + 2; k < lim; k++) {
+      if (buf[k] !== 0x07) continue;
+      const u = readCstr(buf, k + 1);
+      if (u && UKEY_RE.test(u.s)) {
+        uk = u;
+        break;
+      }
+    }
+    if (!uk) continue;
+
+    // 回溯 `01 <id>\0 02 <name>\0`，要求 name 的结尾正好指着锚点
+    let id: string | null = null;
     let name: string | null = null;
-    for (let j = i - 1; j >= Math.max(0, i - 200); j--) {
+    for (let j = i - 1; j >= Math.max(0, i - 400); j--) {
       if (buf[j] !== 0x01) continue;
       const ca = readCstr(buf, j + 1);
       if (!ca || !ID_RE.test(ca.s)) continue;
       if (buf[ca.next] !== 0x02) continue;
       const cb = readCstr(buf, ca.next + 1);
       if (!cb || cb.next !== i) continue;
-      selfId = ca.s;
+      id = ca.s;
       name = cb.s;
       break;
     }
-    if (!selfId || !name) continue;
-    const ukey = readCstr(buf, p + 7);
-    if (!ukey || !ukey.s.startsWith(prefix)) continue; // 只取本文件样式
+    if (!id || !name) continue;
 
-    // 查 paint 定义表：SOLID 样式 selfId 是 paint 表条目的 refId，
-    // buildPaintTable 已建 selfId+refId 双索引，可直接查 selfId 拿 RGBA。
-    const entry = paintMap.get(selfId);
-    const kind: NodePaint["kind"] = entry ? entry.kind : "GRADIENT";
-    const paints: NodePaint[] = [
-      {
-        refId: selfId,
-        kind,
-        color: entry ? entry.color : null,
-      },
-    ];
-    styles.push({
-      id: selfId,
+    const m = UKEY_RE.exec(uk.s)!;
+    out.push({
+      id,
       name,
-      type: "PAINT",
-      collectionId: "M:1",
-      collectionName: "集合",
-      ukey: ukey!.s,
-      isExternal: false,
-      paints,
+      kind,
+      // 二进制里新编码只存 `+<id>`，而浏览器 API 的 ukey 恒为 `<fileId>+<id>`；
+      // 输出时补全前缀，保证与真值一致（旧编码本就带前缀，原样返回）。
+      ukey: m[1] === "" ? fileId + uk.s : uk.s,
+      // 新编码（m[1] 为空）即本文件；旧编码则比较 fileId 前缀
+      isExternal: m[1] !== "" && m[1] !== fileId,
+      description: descText,
+      bodyPos: p05 + 2,
+      end: uk.next,
     });
   }
-  return styles;
+
+  return out;
+}
+
+/** 读取 4 字节紧凑浮点：tag(1B) + 3B 小端尾数，value=(2^24+intLE)·2^(tag−151)。 */
+function readCompactFloat(buf: Buffer, p: number): number {
+  const tag = buf[p];
+  const mantissa = 0x1000000 + buf[p + 3] * 65536 + buf[p + 2] * 256 + buf[p + 1];
+  return mantissa * Math.pow(2, tag - 151);
+}
+
+/** 文字样式（TEXT）。字段来自样式索引记录的 `05 03` 子块。 */
+export interface TextStyle {
+  id: string;
+  name: string;
+  type: "TEXT";
+  ukey: string;
+  isExternal: boolean;
+  collectionId: string;
+  collectionName: string;
+  description: string;
+  /**
+   * 字体名。由二进制中的 PostScript 名按最后一个 `-` 拆分（best-effort）。
+   * ⚠️ family 可能是**压缩形式**：MasterGo 真值 API 对 Open Sans 返回 "Open Sans"，
+   * 而二进制存的是 "OpenSans"。需要精确 family 时请以 `fontPostScriptName` 为准。
+   */
+  fontName: { family: string; style: string } | null;
+  /** 二进制中的原始字体名（如 "Lato-Bold"、"OpenSans-Regular"） */
+  fontPostScriptName: string | null;
+  fontSize: number | null;
+  lineHeight: { value: number; unit: "PIXELS" } | null;
+  /** 字体文件 hash（16 字节 hex），同一字体族/字重的稳定标识 */
+  fontHash: string | null;
+}
+
+/** 从 PostScript 名拆出 family / style（按最后一个 `-`）。 */
+function splitFontName(ps: string): { family: string; style: string } {
+  const i = ps.lastIndexOf("-");
+  if (i <= 0) return { family: ps, style: "Regular" };
+  return { family: ps.slice(0, i), style: ps.slice(i + 1) };
+}
+
+/**
+ * 解析 `05 03` 文字样式子块。
+ *
+ * 子块字段（实测 13/13 与浏览器 `getLocalTextStyles()` 真值一致）：
+ *   `02 <3B 字体族 id> 03 <字体名> \0 04 <紧凑浮点 fontSize> 05 <紧凑浮点 lineHeight>`
+ *   `06 <1B textCase> 0b <1B> 0c <PostScript 名> \0 0e <紧凑浮点 fontSize×1.2> 0f <hash> \0`
+ *   - `0e` = fontSize × 1.2（Lato 12→14、16→19、20→24、40→48 全部验证通过），是自动行高建议值，不单独输出
+ *   - `06`/`0b` 在本文件 13 个样式中恒为 `01`（对应 textCase=ORIGINAL），枚举语义尚未取样，故不输出
+ */
+function parseTextStyleBody(buf: Buffer, rec: StyleIndexRecord): TextStyle | null {
+  let p = rec.bodyPos;
+  if (buf[p] === 0x02) p += 4; // 字体族内部 id，固定 3 字节
+
+  let postScript: string | null = null;
+  let fontHash: string | null = null;
+  let fontSize: number | null = null;
+  let lineHeight: number | null = null;
+
+  while (p < rec.end) {
+    const tag = buf[p];
+    if (tag === 0x03 || tag === 0x0c) {
+      const s = readCstr(buf, p + 1);
+      if (!s) break;
+      postScript = s.s;
+      p = s.next;
+    } else if (tag === 0x04) {
+      fontSize = readCompactFloat(buf, p + 1);
+      p += 5;
+    } else if (tag === 0x05) {
+      lineHeight = readCompactFloat(buf, p + 1);
+      p += 5;
+    } else if (tag === 0x0e) {
+      p += 5;
+    } else if (tag === 0x0f) {
+      const s = readCstr(buf, p + 1);
+      if (!s) break;
+      fontHash = s.s;
+      p = s.next;
+    } else if (tag === 0x06 || tag === 0x0b) {
+      p += 2;
+    } else {
+      break; // 未知字段：宁可停止解析，也不猜错
+    }
+  }
+
+  if (fontSize === null) return null;
+
+  return {
+    id: rec.id,
+    name: rec.name,
+    type: "TEXT",
+    ukey: rec.ukey,
+    isExternal: rec.isExternal,
+    collectionId: "M:1",
+    collectionName: "集合",
+    description: rec.description,
+    fontName: postScript ? splitFontName(postScript) : null,
+    fontPostScriptName: postScript,
+    fontSize,
+    lineHeight: lineHeight === null ? null : { value: lineHeight, unit: "PIXELS" },
+    fontHash,
+  };
+}
+
+/**
+ * 扫描二进制中所有**本文件定义**的文字样式。
+ *
+ * 实测（2026-09 移动端界面设计）：13/13 与浏览器 `getLocalTextStyles()` 真值的
+ * id / name / fontSize / lineHeight 完全一致。
+ */
+export function listLocalTextStyles(buf: Buffer, fileId: string): TextStyle[] {
+  const out: TextStyle[] = [];
+  for (const rec of scanStyleIndex(buf, fileId)) {
+    if (rec.kind !== "TEXT" || rec.isExternal) continue;
+    const st = parseTextStyleBody(buf, rec);
+    if (st) out.push(st);
+  }
+  return out;
+}
+
+// ============================================================================
+// 效果样式（EFFECT）
+// ============================================================================
+
+/**
+ * 效果样式中的一个效果项（阴影/模糊）。
+ *
+ * ⚠️ 只有部分字段能从 `/data` 可靠解出：
+ *   - `color`（含 alpha）：来自效果定义表 `08 <alpha> <R> <G> <B>`，8/8 与真值一致
+ *   - `radius`：来自 `09`，**有该字段时 4/4 一致**；字段缺省时为 null
+ *   - `offsetY`：来自 `0b`，**有该字段时 4/4 一致**；字段缺省时为 null
+ *
+ * 已知局限（2026-09，见 README）：`09`/`0b` 会**整字段缺省**，而缺省并不等于 0
+ * （实测 `0:3140` 无 `0b` 而真值 offsetY=4、`0:7861` 某条无 `09` 而真值 radius=10）。
+ * 缺省规律在现有 6 个效果样式上无法确定，故按「宁可判空也不猜错」输出 null。
+ * `offsetX` / `spread` / `type`（DROP_SHADOW 等）尚未取样到非默认值，同样不输出。
+ */
+export interface EffectItem {
+  /** 颜色（RGBA）；`08` 后的 RGB 与 alpha */
+  color: NodeColor | null;
+  /** 模糊半径（`09`）；字段缺省时为 null */
+  radius: number | null;
+  /** 阴影 Y 偏移（`0b`）；字段缺省时为 null */
+  offsetY: number | null;
+}
+
+/** 效果样式（EFFECT）。 */
+export interface EffectStyle {
+  id: string;
+  name: string;
+  type: "EFFECT";
+  ukey: string;
+  isExternal: boolean;
+  collectionId: string;
+  collectionName: string;
+  description: string;
+  effects: EffectItem[];
+}
+
+/** 读「紧凑浮点或单字节 0」：MasterGo 用单字节 `00` 表示值为 0，非 0 才写 4 字节紧凑浮点。 */
+function readFloatOrZero(buf: Buffer, p: number): { value: number; next: number } {
+  if (buf[p] === 0x00) return { value: 0, next: p + 1 };
+  return { value: readCompactFloat(buf, p), next: p + 4 };
+}
+
+/**
+ * 扫描「效果定义表」，返回 refId（效果样式 id 或节点 id）→ 效果项列表。
+ *
+ * 条目格式（2026-09 破解，与 paint 定义表的区别是 `04 00` 后多一个 `05 <n>`）：
+ *   `01 <effectId> \0 02 <refId> \0 03 61 <c> 00 04 \0 05 <n> 08 <alpha><R><G><B> [09 <radius>] [0b <offsetY>] 0e 01 00`
+ * 实测：移动端界面设计的 6 个效果样式全部在此表中命中（`0:7861` 含 3 个阴影 → 表内 3 条）。
+ */
+function scanEffectTable(buf: Buffer): Map<string, EffectItem[]> {
+  const table = new Map<string, EffectItem[]>();
+
+  for (let i = 0; i + 12 < buf.length; i++) {
+    // 锚点：`03 61 <c> 00 04 00 05 <n> 08`（paint 定义表在此处是 `04 00 08`，无 05）
+    if (!(buf[i] === 0x03 && buf[i + 1] === 0x61 && buf[i + 3] === 0x00 &&
+          buf[i + 4] === 0x04 && buf[i + 5] === 0x00 &&
+          buf[i + 6] === 0x05 && buf[i + 8] === 0x08)) continue;
+
+    // 回溯 `01 <effectId>\0 02 <refId>\0`
+    let refId: string | null = null;
+    for (let j = i - 1; j >= Math.max(0, i - 120); j--) {
+      if (buf[j] !== 0x01) continue;
+      const ca = readCstr(buf, j + 1);
+      if (!ca || !PAINT_ID_RE.test(ca.s)) continue;
+      if (buf[ca.next] !== 0x02) continue;
+      const cb = readCstr(buf, ca.next + 1);
+      if (!cb || !ID_RE.test(cb.s) || cb.next !== i) continue;
+      refId = cb.s;
+      break;
+    }
+    if (!refId) continue;
+
+    let p = i + 9; // 08 之后
+    const alpha = readFloatOrZero(buf, p); p = alpha.next;
+    const r = readFloatOrZero(buf, p); p = r.next;
+    const g = readFloatOrZero(buf, p); p = g.next;
+    const b = readFloatOrZero(buf, p); p = b.next;
+
+    let radius: number | null = null;
+    let offsetY: number | null = null;
+    while (p < buf.length && buf[p] !== 0x00) {
+      const tag = buf[p];
+      if (tag === 0x09) { const v = readFloatOrZero(buf, p + 1); radius = v.value; p = v.next; }
+      else if (tag === 0x0b) { const v = readFloatOrZero(buf, p + 1); offsetY = v.value; p = v.next; }
+      else break; // 未知字段：停止解析，不猜
+    }
+
+    const item: EffectItem = {
+      color: { r: r.value, g: g.value, b: b.value, a: alpha.value },
+      radius,
+      offsetY,
+    };
+    const list = table.get(refId);
+    if (list) list.push(item);
+    else table.set(refId, [item]);
+  }
+
+  return table;
+}
+
+/**
+ * 扫描二进制中所有**本文件定义**的效果样式。
+ *
+ * 实测（2026-09 移动端界面设计）：6/6 条 id/name/ukey 与浏览器 `getLocalEffectStyles()`
+ * 真值一致；`color`（含 alpha）8/8 一致，`radius` 与 `offsetY` 在有该字段时全部一致。
+ */
+export function listLocalEffectStyles(buf: Buffer, fileId: string): EffectStyle[] {
+  const table = scanEffectTable(buf);
+  const out: EffectStyle[] = [];
+  for (const rec of scanStyleIndex(buf, fileId)) {
+    if (rec.kind !== "EFFECT" || rec.isExternal) continue;
+    out.push({
+      id: rec.id,
+      name: rec.name,
+      type: "EFFECT",
+      ukey: rec.ukey,
+      isExternal: rec.isExternal,
+      collectionId: "M:1",
+      collectionName: "集合",
+      description: rec.description,
+      effects: table.get(rec.id) ?? [],
+    });
+  }
+  return out;
+}
+
+// ============================================================================
+// 变量（Variables / Design Tokens）
+// ============================================================================
+
+/**
+ * 一条变量。
+ *
+ * ⚠️ 重要认知（2026-09 实测，纠正了 README 旧说法）：MasterGo 的**「变量」与「样式」是同一批对象**。
+ * 用浏览器真值交叉验证：`getLocalPaintStyles()` + `getLocalTextStyles()` + `getLocalEffectStyles()`
+ * 的 id 集合与 `variables.getVariables()` 的 id 集合**双向完全包含**（各 57 个），
+ * 且变量 type 分布恰为 { PAINT: 38, EFFECT: 6, TEXT: 13 }。
+ * 即：样式 API 是「按 type 过滤的视图」，变量 API 是「统一视图」，二者共用同一张索引表。
+ */
+export interface VariableEntry {
+  id: string;
+  name: string;
+  /** PAINT / EFFECT / TEXT（即样式种类） */
+  type: StyleKind;
+  collectionId: string;
+  collectionName: string;
+  ukey: string;
+  isExternal: boolean;
+  description: string;
+  /** PAINT 变量的颜色（走 paint 定义表）；EFFECT / TEXT 为 null */
+  color: NodeColor | null;
+}
+
+/**
+ * 扫描二进制中所有**本文件定义**的变量（= 样式统一视图）。
+ *
+ * 实测（2026-09 移动端界面设计）：57/57 条 id/name/type 与浏览器
+ * `variables.getVariables()` 真值一致；PAINT 变量颜色与 `getLocalPaintStyles()` 一致。
+ *
+ * 未输出项：`scopes`（真值中 PAINT 恒为 fill/shapeFill/textFill/stroke、其余为 []，
+ * 但二进制内未定位到该字段，故不猜）、`codeSyntax`、`modes` 的多模式值（本文件仅 1 个模式 M:2）。
+ */
+export function listLocalVariables(buf: Buffer, fileId: string): VariableEntry[] {
+  const paintMap = buildPaintTable(buf);
+  const out: VariableEntry[] = [];
+
+  for (const rec of scanStyleIndex(buf, fileId)) {
+    if (rec.isExternal) continue;
+    let color: NodeColor | null = null;
+    if (rec.kind === "PAINT") {
+      const entry = paintMap.get(rec.id);
+      color = entry ? entry.color : null;
+    }
+    out.push({
+      id: rec.id,
+      name: rec.name,
+      type: rec.kind,
+      collectionId: "M:1",
+      collectionName: "集合",
+      ukey: rec.ukey,
+      isExternal: rec.isExternal,
+      description: rec.description,
+      color,
+    });
+  }
+
+  return out;
 }

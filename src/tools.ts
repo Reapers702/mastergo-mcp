@@ -2,13 +2,19 @@
  * MCP 工具实现（基于 MasterGo **网页接口**自研，不依赖官方 MCP 网关 /mcp/*）。
  *
  * 认证：浏览器 Cookie（MG_COOKIE）即可；无需付费席位 / 个人访问令牌。
- * 当前已实现：
+ * 当前已实现（8 个）：
  *   - get_file_meta：文件元信息（/api/v1/documents/{id}）
  *   - list_pages：页面列表（解析 /data/{fileKey} 私有二进制索引）
  *   - get_file_nodes：全量节点索引（页面 + 全部名节点的 id/名称，可搜索过滤）
  *   - get_page_tree：节点树（父子层级 + 类型 + 几何/布局属性 + 颜色/描边）
- *   - list_styles：文件本地 paint 样式（颜色样式，按 ukey 筛本文件定义）
- * 更深的读取能力（文字样式 / 效果样式 / 组件库 / 变量 / 导出）将在后续通过网页二进制自研增量加入。
+ *   - list_styles：文件本地颜色样式（PAINT）
+ *   - list_text_styles：文件本地文字样式（TEXT）
+ *   - list_effect_styles：文件本地效果样式（EFFECT，阴影/模糊）
+ *   - list_variables：文件本地变量（Design Tokens；实测与「样式」是同一批对象）
+ * 仍待加入：组件库（COMPONENT/COMPONENT_SET）、图片/切图导出。
+ *
+ * 样式与变量共用一张「样式索引表」，其类型判别式是记录内的 `05 <n>`：
+ * n=1 → PAINT、n=2 → EFFECT、n=3 → TEXT（实测 57/57 纯净）。详见 node-tree.ts。
  */
 
 import { z } from "zod";
@@ -217,12 +223,14 @@ export function buildTools(): ToolDef[] {
       name: "list_styles",
       description:
         "列出 MasterGo 文件本地 paint 样式（颜色样式）：id、名称、collection、ukey、paint 颜色等。" +
-        "通过浏览器 Cookie 全量下载 /data/{fileKey} 私有二进制，扫描 paint 样式聚合记录，" +
-        "按 ukey 前缀匹配 fileId 筛本文件定义的样式（不含团队库/外部引用）。" +
-        "实测（2026-09 火车票文件）：4 个本地 paint 样式的 id/name/ukey/RGBA 颜色全部与" +
-        "浏览器 getLocalPaintStyles() API 真值一致（4/4 命中）。" +
+        "通过浏览器 Cookie 全量下载 /data/{fileKey} 私有二进制，扫描样式索引表，" +
+        "按记录内 `05 <n>` 判类型、按 ukey 判定是否本文件（不含团队库/外部引用）。" +
+        "支持 MasterGo 的两套 ukey 编码：新编码只存 `+<selfId>`（无 fileId 前缀），旧编码存 `<fileId>+<selfId>`。" +
+        "实测（2026-09）：移动端界面设计（新编码）38/38 条 id/name/ukey 与浏览器 getLocalPaintStyles() " +
+        "真值一致、SOLID 颜色逐值相同；火车票（旧编码）4 条，与既有基线一致。" +
         "渐变样式（GRADIENT_LINEAR/RADIAL）目前只标记 kind，渐变 stops 多色解码暂未实现，color 为 null；" +
-        "collectionId 默认 'M:1'、collectionName 默认 '集合'（二进制中无独立 collection 表，疑似客户端默认构造）。" +
+        "collectionId 默认 'M:1'、collectionName 默认 '集合'（真值 getCollections() 证实 M:1 即本文件的" +
+        "默认变量集合，而非客户端凭空构造）。" +
         "参数 file 传文件 ID 或完整 URL。",
       params: {
         file: z.string().describe("MasterGo 文件 ID 或完整文件 URL（必填）"),
@@ -239,6 +247,103 @@ export function buildTools(): ToolDef[] {
           fileKey,
           totalStyles: styles.length,
           styles,
+        });
+      },
+    },
+
+    {
+      name: "list_text_styles",
+      description:
+        "列出 MasterGo 文件本地文字样式（TEXT）：id、名称、ukey、字体名、字号、行高、字体 hash。" +
+        "通过浏览器 Cookie 全量下载 /data/{fileKey} 私有二进制，扫描样式索引表中 `05 03` 记录" +
+        "（`05 <n>` 是类型判别式：1=颜色样式 / 2=效果样式 / 3=文字样式），" +
+        "再解析记录内的文字子块（`03 字体名` / `04 紧凑浮点 fontSize` / `05 紧凑浮点 lineHeight` / " +
+        "`0c PostScript 名` / `0f 字体 hash`）。" +
+        "实测（2026-09 移动端界面设计）：13/13 条 id/name/fontSize/lineHeight 与浏览器 " +
+        "getLocalTextStyles() 真值完全一致。" +
+        "⚠️ fontName 的 family 由 PostScript 名按最后一个 `-` 拆分，可能是**压缩形式**" +
+        "（二进制存 OpenSans，真值 API 返回 'Open Sans'）；需要精确字体名时请用 fontPostScriptName。" +
+        "参数 file 传文件 ID 或完整 URL。",
+      params: {
+        file: z.string().describe("MasterGo 文件 ID 或完整文件 URL（必填）"),
+      },
+      run: async (client, args) => {
+        const { fileId } = normalize(String(args.file));
+        const meta = await client.getFileMeta(fileId);
+        const fileKey: string | undefined = meta.data?.fileKey;
+        if (!fileKey) throw new MasterGoError("无法获取 fileKey，请检查文件 ID 与访问权限");
+        const styles = await client.getLocalTextStyles(fileKey, fileId);
+        return jsonOut({
+          source: "web-data-style-index",
+          fileId,
+          fileKey,
+          totalStyles: styles.length,
+          styles,
+        });
+      },
+    },
+
+    {
+      name: "list_effect_styles",
+      description:
+        "列出 MasterGo 文件本地效果样式（EFFECT，阴影/模糊）：id、名称、ukey、颜色与模糊半径。" +
+        "通过浏览器 Cookie 全量下载 /data/{fileKey} 私有二进制，扫描样式索引表中 `05 02` 记录" +
+        "（`05 <n>` 是类型判别式：1=颜色 / 2=效果 / 3=文字），再从「效果定义表」取具体数值。" +
+        "效果定义表条目格式：`01 <effectId> 02 <refId> 03 61 <c> 00 04 00 05 <n> 08 <alpha><R><G><B> " +
+        "[09 <radius>] [0b <offsetY>] 0e 01 00`（0 值用单字节 `00`，非 0 用 4 字节紧凑浮点）。" +
+        "实测（2026-09 移动端界面设计）：6/6 条 id/name 与浏览器 getLocalEffectStyles() 一致；" +
+        "color（含 alpha）全部一致；radius / offsetY 在有该字段时全部一致。" +
+        "⚠️ 已知局限：`09`/`0b` 会**整字段缺省**，且缺省不等于 0（实测有 offsetY=4 却无 `0b` 的条目），" +
+        "缺省规律在现有 6 个样式上无法确定，故按「宁可判空也不猜错」输出 null。" +
+        "offsetX / spread / type（DROP_SHADOW 等）尚未取样到非默认值，暂不输出。" +
+        "参数 file 传文件 ID 或完整 URL。",
+      params: {
+        file: z.string().describe("MasterGo 文件 ID 或完整文件 URL（必填）"),
+      },
+      run: async (client, args) => {
+        const { fileId } = normalize(String(args.file));
+        const meta = await client.getFileMeta(fileId);
+        const fileKey: string | undefined = meta.data?.fileKey;
+        if (!fileKey) throw new MasterGoError("无法获取 fileKey，请检查文件 ID 与访问权限");
+        const styles = await client.getLocalEffectStyles(fileKey, fileId);
+        return jsonOut({
+          source: "web-data-style-index",
+          fileId,
+          fileKey,
+          totalStyles: styles.length,
+          styles,
+        });
+      },
+    },
+
+    {
+      name: "list_variables",
+      description:
+        "列出 MasterGo 文件本地变量（Design Tokens）：id、名称、type（PAINT/EFFECT/TEXT）、collection、ukey、颜色。" +
+        "⚠️ 实测认知（纠正旧文档）：MasterGo 的「变量」与「样式」是**同一批对象**——浏览器真值中 " +
+        "getLocalPaintStyles/getLocalTextStyles/getLocalEffectStyles 的 id 集合与 variables.getVariables() " +
+        "的 id 集合双向完全包含（本文件各 57 个），变量 type 分布恰为 {PAINT:38, EFFECT:6, TEXT:13}。" +
+        "即样式 API 是「按 type 过滤的视图」，本工具是「统一视图」。" +
+        "实测（2026-09 移动端界面设计）：57/57 条 id/name/type 与浏览器 variables.getVariables() 真值一致。" +
+        "collectionId 为 'M:1'、collectionName 为 '集合'（真值 getCollections() 证实 M:1 即本文件的默认变量集合，" +
+        "模式 id 为 'M:2'，二者都是真实 id，而非客户端凭空构造）。" +
+        "未输出：scopes（二进制内未定位到该字段，不猜）、codeSyntax、多模式值。" +
+        "参数 file 传文件 ID 或完整 URL。",
+      params: {
+        file: z.string().describe("MasterGo 文件 ID 或完整文件 URL（必填）"),
+      },
+      run: async (client, args) => {
+        const { fileId } = normalize(String(args.file));
+        const meta = await client.getFileMeta(fileId);
+        const fileKey: string | undefined = meta.data?.fileKey;
+        if (!fileKey) throw new MasterGoError("无法获取 fileKey，请检查文件 ID 与访问权限");
+        const variables = await client.getLocalVariables(fileKey, fileId);
+        return jsonOut({
+          source: "web-data-variable-index",
+          fileId,
+          fileKey,
+          totalVariables: variables.length,
+          variables,
         });
       },
     },

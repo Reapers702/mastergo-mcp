@@ -20,7 +20,7 @@ import { readFileSync, existsSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import axios from "axios";
-import { parsePageTree } from "../src/node-tree.ts";
+import { parsePageTree, listLocalPaintStyles, listLocalTextStyles } from "../src/node-tree.ts";
 
 // ---- 文件常量（火车票，公开）----
 const FILE_KEY = "890c5c78-a533-4751-91ef-06e3fbb70d5e";
@@ -123,7 +123,59 @@ async function main() {
 
   const ok = r.miss <= MAX_MISS && ratio >= HIT_RATIO_THRESHOLD;
   console.log(ok ? "  ✅ PASS" : "  ❌ FAIL");
-  if (!ok) process.exit(1);
+
+  const stylesOk = checkStyles(buf);
+  if (!ok || !stylesOk) process.exit(1);
+}
+
+/**
+ * 样式解码守卫：火车票（legacy 编码）文件本地的颜色样式。
+ *
+ * 基线（README 既有记录）：4 个本地 paint 样式；该文件 0 个文字样式、0 个效果样式。
+ *
+ * 这条守卫的意义：legacy 与 modern 是**两套 ukey 编码**，只测其中一个极易改坏另一个 ——
+ * 历史上的 `list_styles` 漏检 bug 正是「在新编码上返回 0 条、在旧编码上看起来完全正常」。
+ */
+const EXPECTED_STYLES: Array<{ id: string; name: string; kind: string }> = [
+  { id: "5377:50013", name: "渐变", kind: "GRADIENT" },
+  { id: "5481:060489", name: "f1f4fb", kind: "SOLID" },
+  { id: "5481:060533", name: "1", kind: "SOLID" },
+  { id: "5481:060542", name: "2", kind: "SOLID" },
+];
+
+function checkStyles(buf: Buffer): boolean {
+  const fileId = "115278536821990";
+  const styles = listLocalPaintStyles(buf, fileId);
+  const texts = listLocalTextStyles(buf, fileId);
+
+  console.log(`[regress] 样式解码回归（legacy 编码）`);
+  console.log(`  paint 样式 = ${styles.length}（基线 ${EXPECTED_STYLES.length}）`);
+  console.log(`  文字样式   = ${texts.length}（基线 0）`);
+
+  let ok = styles.length === EXPECTED_STYLES.length && texts.length === 0;
+  for (const want of EXPECTED_STYLES) {
+    const got = styles.find((s) => s.id === want.id);
+    if (!got) {
+      console.log(`  ❌ 缺少样式 ${want.id} ${want.name}`);
+      ok = false;
+      continue;
+    }
+    if (got.name !== want.name) {
+      console.log(`  ❌ ${want.id} name: got=${JSON.stringify(got.name)} want=${JSON.stringify(want.name)}`);
+      ok = false;
+    }
+    if (got.paints[0]?.kind !== want.kind) {
+      console.log(`  ❌ ${want.id} kind: got=${got.paints[0]?.kind} want=${want.kind}`);
+      ok = false;
+    }
+    // legacy 编码的 ukey 必须带 fileId 前缀，且被判定为本文件（未被误当外部引用）
+    if (!got.ukey.startsWith(fileId + "+")) {
+      console.log(`  ❌ ${want.id} ukey 前缀异常: ${got.ukey}`);
+      ok = false;
+    }
+  }
+  console.log(ok ? "  ✅ PASS" : "  ❌ FAIL");
+  return ok;
 }
 
 main().catch((err) => {

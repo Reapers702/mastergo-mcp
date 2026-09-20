@@ -1,59 +1,140 @@
 # 下一步可做的事（交接清单）
 
-> 生成于 2026-09-19，对应提交 `3eb9564`。字段级逆向细节见 README「待实现能力 / 接手指南」，本文只列**优先级、入口、阻塞与工作量**。
+> 更新于 2026-09-20。字段级逆向细节见 README，本文只列**优先级、入口、阻塞与工作量**。
 
 ## 现状一句话
 
-`get_file_meta` / `list_pages` / `get_file_nodes` / `get_page_tree` / `list_styles` 五个工具可用；节点树在 **legacy 格式**（火车票）实测 828/829 = 99.9%、0 错判，**modern 格式**（Ant Design 5.0）命中 8.3%、错判 0.41%（FRAME 等容器返回 `null`）。
+**8 个工具**可用：`get_file_meta` / `list_pages` / `get_file_nodes` / `get_page_tree` / `list_styles` / `list_text_styles` / `list_effect_styles` / `list_variables`。
+
+- 节点树：legacy 828/828（0 错判）、modern 命中 8.3%（容器仍返回 `null`）
+- **样式与变量：已全面打通**，与浏览器真值逐条一致 —— 颜色 38/38、文字 13/13、效果 6/6、变量 57/57
 
 ---
 
-## P0 · 有明确线索，本地就能做（不阻塞）
+## 🔑 2026-09-20 的关键突破（先读这段）
 
-### 1. 定位那 608 个节点的布局值覆盖来源
-- **现象**：autoLayout 的 `itemSpacing` / `padding` 错判**高度集中**——各字段 top1 错判都是同一批 **608 个节点**（`itemSpacing 0→10`、`paddingTop 6→1`、`paddingRight 6→3`…），占该字段全部错判的 ~90%。
-- **已有线索**：几何段内 `2a {"tokens":...}` 令牌覆盖、或值由父级/母版继承（实例内部节点 id 含 `/`，其 `1c 07` 块省略布局字段）。
-- **入口**：把这 608 个节点 id 导出，与父节点/母版节点的布局值对照；确认是「继承」还是「令牌覆盖」。若是继承，可给 `autoLayout` 补一个 `inherited` 标记或回填父值。
-- **收益**：`itemSpacing` 98.03% → 可能接近 100%，padding 四边同理。
-- **素材**：`ad_src.bin` + `ad_truth.json`（都在 `%TEMP%/Trae/tools/`），无需网络。
+### 0. 真值导出链路已打通 —— 旧文档说的「做不了」已不成立
 
-### 2. legacy 格式的 COMPONENT 识别 —— ✅ 已完成（2026-09）
-- **结论**：已补齐。legacy 文件中可能嵌入 modern 容器块（`1c 07 01 01`，组件库/混合格式），在 legacy 分支复用 modern 的零假阳性判据 `b===0x07 && c===0x01 && hasSelfUkey` → COMPONENT。实测火车票 3 个组件根下识别出 **87 个 COMPONENT**（如「组件/Checkbox」），PAGE 树回归 828/828、0 错判，误伤为零。
-- **实测关键**（与本文原文预测不同）：火车票这 100 个带 selfUkey 的节点**全部挂在「组件根」下**（`6846:53669`、`5026:42651`、`11458:99555`），**不在用户 PAGE 树** `10371:87078` 内。因此原来「828/829 未覆盖」是为真的，但**当前 `get_page_tree`（按 PAGE 根）并不会输出它们**——只有对组件根调用时才会暴露，修复主要服务于组件根场景。
-- **已验证免回归**：改动只在 `format==="legacy"` 分支；AD 稿（modern，`1c 07 01 01` 占比 49.8%）不进入该分支，逻辑零影响。
-- ⚠️ **已证伪的思路**：不要再用「首个 `1c` 块第 2/3 字节试 `01/02/07/08`」（README ④ 原文建议）。modern 下容器块统一为 `1c 07 01 01 02 00 …`，试值法完全失效。
+旧版本文档（及本文件上一版）反复强调一条阻塞：
+
+> `browser-skill` **不支持任意页面 JS 求值**，因此 `window.mg` 真值导出做不了
+
+**这条现在不成立**。当前会话的浏览器工具支持在页面里执行任意 JS（`browser_execute`），
+于是 README 里那套「`evaluate_script` 调 `window.mg` 导真值」的方法论**完全可用**。
+
+实测 `window.mg` 是完整的插件 API（99 个键），关键导出函数：
+
+| 用途 | 函数 |
+| --- | --- |
+| 颜色样式 | `getLocalPaintStyles()` |
+| 文字样式 | `getLocalTextStyles()` |
+| 效果样式 | `getLocalEffectStyles()` |
+| **变量** | `variables`（object）→ `getCollections()` / `getVariables()` / `getModes()` / `getGroupList()` |
+| 组件 | `getComponentListVal()` |
+| 旧文档完全没提到 | `getLocalGridStyles` / `getLocalPaddingStyles` / `getLocalSpacingStyles` / `getLocalCornerRadiusStyles` / `getLocalStrokeWidthStyles` |
+
+**导出真值的可复用做法**（避免大 JSON 手工搬运）：
+
+1. 页面里把真值 `JSON.stringify` 后挂到 `window.__T`
+2. 起一个本地接收器（见 `.cache/post_server.cjs`，`node .cache/post_server.cjs <out.json> 8787`）
+3. `browser_execute` 里 `fetch('http://127.0.0.1:8787/', { method:'POST', body: window.__T })`
+   —— HTTPS 页面 POST 到 `127.0.0.1` 不会被拦（localhost 属 potentially trustworthy），
+   接收器回 `Access-Control-Allow-Origin: *` 即可
+
+> 注意：页面里 `a.download` + Blob 触发的自动下载**会被浏览器拦截**，别走那条路。
+
+### 1. 样式索引表结构已破解（两套编码）
+
+记录格式：
+
+```
+01 <id> \0 02 <name> \0 03 61 <c> \0 [04 <desc> \0] 05 <n> [子块] 00 00 [06 01] 07 <ukey> \0
+```
+
+- **`05 <n>` 才是类型判别式**：`1`=PAINT、`2`=EFFECT、`3`=TEXT（实测 57/57 纯净、零杂音）
+- ⚠️ `03 61 <c>`（a0/a1/aL…）**不是**类型：同类型的 c 各不相同（Purple=aL、Yellow=a1、Success=aF），只是个序号
+- **两套 ukey 编码**：新文件只存 `+<selfId>`（**不含 fileId**），旧文件存 `<fileId>+<selfId>`
+- `04 <desc>` 与 `06 01` 均可整体缺省（旧编码常见 `06 01`，新编码没有）
+
+### 2. 「变量」与「样式」是同一批对象（纠正旧文档）
+
+用浏览器真值交叉验证：
+
+```
+样式 id 集合（paint 38 + text 13 + effect 6 = 57） == 变量 id 集合（57），双向完全包含
+变量 type 分布恰为 { PAINT: 38, EFFECT: 6, TEXT: 13 }
+```
+
+即 `getLocalPaintStyles()` 等只是**按 type 过滤的视图**，`variables.getVariables()` 是**统一视图**。
+**破解变量 = 破解样式，同一张表**，工作量减半。
+
+同时 `collectionId:"M:1"` / `modeId:"M:2"` 是**真实 id**（真值 `getCollections()` 返回
+`[{id:"M:1", name:"集合", modes:[{id:"M:2", name:"模式 1"}]}]`），
+旧文档「二进制中没有独立 collection 表、疑似客户端默认构造」的推测**是错的**。
+
+### 3. `list_styles` 漏检 bug 已修（现有功能的真实缺陷）
+
+旧实现要求 `ukey.startsWith(fileId + "+")`，而新编码的 ukey 是 `+0:26620`（无 fileId），
+导致「移动端界面设计」文件上 **返回 0 条**（真值 38 条）。现已改为：
+
+- 用 `07 <ukey> \0` 作锚点（样式记录独有，可排除大量形似的节点记录）
+- 本文件判定：`+<id>` 视为本文件；`<fid>+<id>` 则比较 fid
+- 另一个隐藏 bug：paint 定义表里 paint 图元 id 是 `:005`（**省略数字前缀**），
+  被严格的 `ID_RE` 整条跳过 → 所有样式颜色解成 `null`。已引入 `PAINT_ID_RE` 放宽。
 
 ---
 
-## P1 · 有真值就能做（**阻塞在真值导出**）
+## P0 · 已完成
 
-### 3. 文字样式（Text Styles）/ 效果样式（Effect Styles）— 原列表 ②③
-- **阻塞**：需要「含文字/效果样式的设计稿 + `getLocalTextStyles()` / `getLocalEffectStyles()` 真值」。火车票文件里 0 个文字样式、0 个效果样式。
-- **真值怎么来**：README 假设用 chrome-devtools MCP 的 `evaluate_script` 调 `window.mg`。**但本会话的 `browser-skill` 明确不支持任意页面 JS 求值**，这条路当前走不通 → 需要你手工在浏览器 console 导出 JSON，或换一个支持 `evaluate_script` 的工具。
-- **入口**：README 接手指南 ②/③ 有具体步骤（搜 `+<styleId>` 定位聚合记录、比对 paint 样式那种 `03 61 <subtype>` 结构）。
+- **608 个 autoLayout 错判定位** —— 结论：DatePicker 组件库实例的布局被客户端主题覆盖，
+  二进制存定义值、浏览器存覆盖值，**无可靠二进制判据，按宁缺毋滥不回填**（详见 README）。
+- **legacy 格式 COMPONENT 识别** —— 已补齐（复用 modern 的零假阳性 `selfUkey` 判据）。
+- **文字样式 / 效果样式 / 变量** —— 已实现并交付 3 个工具（原 P1 全部三项）。
 
-### 4. 变量 / Design Tokens — 原列表 ④
-- **阻塞**：同上（真值），且 `window.mg` 里 variables 的导出函数名都还没确认。
-- **入口**：README 接手指南 ⑤。
+---
+
+## P1 · 有真值就能继续做（真值导出已通，门槛只剩「取样」）
+
+### 4. 效果样式的 `09`/`0b` 缺省规律 ⭐ 最值得做
+- **现象**：效果定义表里 `09`(radius) / `0b`(offsetY) 会**整字段缺省**，而缺省**不等于 0**。
+  实测 `0:3140` 无 `0b` 但真值 offsetY=4；`0:7861` 某条无 `09` 但真值 radius=10。
+- **为何难**：当前文件只有 **6 个效果样式**、8 个效果项，样本太少。
+- **入口**：用浏览器打开一个**阴影样式多、且 offsetY/radius 取值分散**的设计稿，导真值，
+  看缺省与哪些字段相关（怀疑与某个「默认值继承」或 `05 <n>` 计数有关）。
+- **收益**：`list_effect_styles` 的 radius/offsetY 从「有字段才给」变为完整。
+- **另需取样**：`offsetX` / `spread` / `type`（INNER_SHADOW / LAYER_BLUR / BACKGROUND_BLUR）
+  在现有素材中**全部是默认值**，无从验证。
+
+### 5. 渐变样式的 stops 多色解码
+- 真值已拿到（`gradientStops` 含 position + RGBA、`gradientHandlePositions`、`transform`、`type`），
+  但二进制里渐变 paint 的多色 stops 尚未定位。现有实现只标记 `kind`，`color` 为 `null`。
+
+### 6. 组件索引表（144 个组件在二进制里 0 命中）
+- **现象**：`getComponentListVal()` 真值 144 条，但 `07 2b <id>`（样式 ukey 锚点）**一条都不命中**。
+- **结论**：组件用**另一套编码**（不带 ukey 字段），需另找锚点。
+- 真值字段：`id / ukey / name / isExternal / pageId / pageName / parentId / width / height`
+  （注意真值里**没有 type 字段**，COMPONENT vs COMPONENT_SET 需另判）。
 
 ---
 
 ## P2 · 纯工程，不依赖真值
 
-### 5. 回归测试脚本（**我建议优先加**）
-- **动机**：本次连续踩到三个坑——两套容器编码、`/data` 响应不可字节复现、`Range` 被忽略。没有回归守卫，下次改 `decodeNodeType` 很容易悄悄退化。
-- **可行性**：火车票文件是**公开文件**（`isPublic: true`），**匿名即可下载**，所以 CI 也能跑。829 条真值 JSON 只有约 270KB，可以入库。
-- **做法**：`npm run test:regress` → 下载 `/data` → 逐根 `parsePageTree` → 断言 828/829、0 错判。**注意**：必须按结构比对，不能比 md5。
-- **代价**：每次跑要下载 47MB（缓存后 ~2s 解析）。
+### 7. 回归测试扩展 —— ✅ 已完成（2026-09-20）
+- `npm run test:regress`（**legacy 守卫，CI 可跑**）：节点类型 828/828 + 0 错判，**并已加入火车票 paint 样式断言 4 条**
+  （`渐变` / `f1f4fb` / `1` / `2`，含 ukey 前缀校验）与「文字样式 0 条」断言。
+- `npm run test:styles`（**modern 守卫，不进 CI**）：对照 `test/fixtures/truth_mobile_kit.json`（已入库，68KB）断言
+  颜色 **38/38**（SOLID 逐值 RGBA）、文字 **13/13**（fontSize/lineHeight/字体名）、效果 **6/6**、变量 **57/57**。
+  需 `.cache/mg_mobile_kit.bin`（私有文件快照，6.2MB，不入库；缺失时脚本提示并跳过），或用 `MG_STYLE_SRC=<路径>` 指定。
+- **为什么两套都要**：legacy 与 modern 是**两套 ukey 编码**，只测一个极易改坏另一个 ——
+  `list_styles` 漏检 bug 正是「modern 返回 0 条、legacy 看起来完全正常」。
 
-### 6. 打包发布 — 原列表 ⑧
-- `package.json` 补 `bin` / `files`，用 esbuild 出单文件，免 `npx tsx` 依赖。当前 `npm run build && node dist/index.js` 已可用。
+### 8. 打包发布
+- `package.json` 补 `bin` / `files`，用 esbuild 出单文件，免 `npx tsx` 依赖。
+  当前 `npm run build && node dist/index.js` 已可用。
 
-### 7. 设计稿差异对比 — 原列表 ⑥
-- 基于现有 `get_page_tree` 输出做两份快照的节点 diff（id/名称/类型/几何）。不阻塞。
-
-### 8. 图片 / 切图导出 — 原列表 ⑤
-- **先调研**：MasterGo 是否有可用的导出 HTTP 接口（本会话未查）。若只有前端渲染路径，可能做不了，需先确认可行性再动手。
+### 9. 设计稿差异对比 / 图片切图导出
+- diff：基于现有 `get_page_tree` 输出做两份快照的节点 diff，不阻塞。
+- 切图：**先调研** MasterGo 是否有可用导出 HTTP 接口（`window.mg` 里未见导出函数），可行才动手。
 
 ---
 
@@ -62,37 +143,43 @@
 | 项 | 现状 | 为何搁置 |
 | --- | --- | --- |
 | modern 的 FRAME / COMPONENT_SET | 返回 `null` | 段内无结构判别式（~1500 样本/类型、220B 窗口 n-gram 搜索无果）；宁可判空不猜错 |
-| COMPONENT_SET vs COMPONENT | 折叠为 COMPONENT（48 例错判） | 最优候选判别式精确率仅 79%、会误标 7 个 COMPONENT、只多命中 27 个 |
-| 255 条「容器→LINE/RECTANGLE」 | 错判 | 其几何段首个 `1c` 恰是叶子标记；让容器块压过叶子标记精确率仅 55%（464 条中 255 为容器、209 无真值） |
-| 叶子类型在 modern 下的准确率 | **未知** | `ad_truth.json` 只含容器类型（73620/295784 = 24.9%），无叶子真值可对照 |
+| COMPONENT_SET vs COMPONENT | 折叠为 COMPONENT | 最优候选判别式精确率仅 79%，会误标 7 个 COMPONENT |
+| 255 条「容器→LINE/RECTANGLE」 | 错判 | 让容器块压过叶子标记精确率仅 55% |
+| 文字样式的 textCase / decoration / letterSpacing | 未输出 | 现有 13 个样式里这三个字段**全是同一个值**（ORIGINAL / NONE / 0），无法验证枚举语义 |
+| 变量 scopes / codeSyntax / 多模式 | 未输出 | 二进制内未定位到 scopes 字段；本文件只有 1 个模式 M:2，多模式无从验证 |
 
 ---
 
 ## 环境与踩坑备忘
 
-**构建**
-- WSL 下 `npm run build` 原本失败：`node_modules` 是在 Windows 装的，只有 `@typescript/typescript-win32-x64`。已补装 `@typescript/typescript-linux-x64`（`--no-save`，**未改 `package.json`**，在 Linux 下重装依赖需再来一次）。
-- npm 默认缓存 `/root/.npm/_cacache` 只读 → 需 `npm install --cache ./.npm-cache`。
+**构建与运行**（2026-09-20 在 macOS / Node 24 实测通过）
+- `npm run build`（tsc）✅ 通过
+- `npm run test:regress` ✅ PASS：828/828 = 100%、0 错判（**匿名下载** 47MB 公开文件，CI 可跑）
 
-**git**
-- 全局身份**已配置好**（`/root/.gitconfig` → `guanxin <gf__boy@163.com>`，另含 `safe.directory=*`），直接 `git commit` 即可，无需再加 `-c` 参数。
-- 远端 `origin = git@github.com:Reapers702/mastergo-mcp.git`。**提交前记得 `git push`**——本清单生成时 `3eb9564` 及其后的文档改动尚未推送。
+**素材位置**（`.cache/` 已 gitignore，不入库）
+| 文件 | 说明 |
+| --- | --- |
+| `test/fixtures/truth_mobile_kit.json` | **已入库**：移动端界面设计全部真值（样式 57 + 组件 144 + 变量 57 + 集合/组），供 `npm run test:styles` 使用 |
+| `.cache/mg_mobile_kit.bin` | 该文件 `/data` 快照，6.2MB |
+| `.cache/train_ticket.bin` | 火车票 `/data` 快照，47.9MB（公开） |
+| `.cache/post_server.cjs` | 真值导出用的本地 POST 接收器 |
 
-**`/data` 接口三个反直觉特性**（都实测过，README 也有记）
-1. **不可字节复现**：同一未变动文件连续下载 md5 不同（长度相同、可有数千万字节差异，疑似序列化顺序随机）→ **回归按结构比对，不要用 md5 / 整文件 diff**。解析器对此稳健（已验证：4353 万字节差异的两份下载解出完全一致的 828/829）。
-2. **忽略 `Range`**：带 `Range` 仍返回 200 + 完整 content-length → 别指望分段下载（客户端已按 206/200 判断并复用全量缓存）。
-3. **公开文件无需任何认证**：不带 Cookie 甚至无效 Cookie 都返回 200 与完整数据；私有文件才需要 Cookie。
+文件 id：
+- 移动端界面设计（**私有**）`107389953208823` / fileKey `2b195a62-0d3e-40ee-b55f-59b607e729a0`
+- 火车票（公开）`115278536821990` / fileKey `890c5c78-a533-4751-91ef-06e3fbb70d5e`
 
-**真值素材**（`%TEMP%/Trae/tools/`，Windows 路径，WSL 下为 `/mnt/c/Users/Reaper/AppData/Local/Temp/Trae/tools/`）
-- `mg_src.bin` 47,881,863B — 火车票 legacy 快照（**线上文件已更新为 47,882,079B**，但两者都实测通过 828/829；回归可任选，用实时下载更适合 CI）
-- `ad_src.bin` 105,789,875B — Ant Design 5.0 modern 快照
-- `mng_alltruth.json` — 火车票 829 条，字段名 `type`
-- `ad_truth.json` — AD 稿 73620 条容器真值，字段名 `t`（**用 `n.t ?? n.type` 兼容**）
-- 文件 id：火车票 `115278536821990` / `890c5c78-a533-4751-91ef-06e3fbb70d5e`（公开）；AD 稿 `204971164239455` / `eb0ea904-aa4f-4e83-863b-5071a4d386a3`（私有）
+**`/data` 接口三个反直觉特性**
+1. **不可字节复现**：同一未变动文件连续下载 md5 不同 → 回归按结构比对，别用 md5 / 整文件 diff
+2. **忽略 `Range`**：带 `Range` 仍返回 200 + 完整 content-length
+3. **公开文件无需任何认证**；私有文件才需要 Cookie（可用浏览器会话直接下载）
 
-**回归怎么跑**
-- 真值必须**按「所属根节点」分组**，对每个根调 `parsePageTree`（AD 稿 473 个根，全量约 **35 分钟**）。单遍扫描覆盖不到实例内部节点。
-- 写 `probe_*.mjs` 放项目根目录，**验证后删除**（这是本仓库的既有约定）。
+**紧凑浮点编码**（反复用到）
+`tag`(1 字节) + 3 字节小端尾数，`value = (2²⁴ + intLE) · 2^(tag−151)`。
+自检：`82 00 00 80` → 12；`83 00 00 10` → 17。**0 值单独用 1 字节 `00` 表示**（不写 4 字节）。
 
-**工具限制**
-- `browser-skill` **不支持任意页面 JS 求值**，因此 `window.mg` 真值导出（README 里写的 chrome-devtools MCP 路径）目前做不了 → P1 的三项都被这一点卡住。
+**写探针的约定**
+- `probe_*.mjs` 放项目根目录，**验证后删除**（本仓库既有约定）
+- 用 `npx tsx probe_xxx.mjs` 可直接 import `./src/node-tree.ts`
+
+**工具限制（已过时，勿再引用）**
+- ~~`browser-skill` 不支持任意页面 JS 求值~~ → **当前会话已支持**，`window.mg` 真值可导出

@@ -276,19 +276,66 @@ export class MasterGoClient {
   }
 
   /**
-   * 文件本地 paint 样式列表（颜色样式）：扫描 /data/{fileKey} 二进制中所有 paint 样式
-   * 聚合记录，按 ukey 前缀匹配 fileId 筛本文件定义的样式（不含团队库/外部引用）。
+   * 文件本地 paint 样式列表（颜色样式）：扫描 /data/{fileKey} 二进制中的**样式索引表**。
    *
-   * 实测（2026-09 火车票文件）：返回 4 个本地 paint 样式，id/name/ukey/RGBA 颜色
-   * 全部与浏览器 getLocalPaintStyles() API 真值一致（4/4 命中）。
+   * 本文件判定不再只看 ukey 前缀：新编码的 ukey 只存 `+<selfId>`（不含 fileId），
+   * 旧编码存 `<fileId>+<selfId>`；两种都支持，外部文件（其他 fileId 前缀）仍被排除。
+   *
+   * 实测（2026-09）：
+   *   - 移动端界面设计（新编码）：38/38 条 id/name/ukey 与浏览器 `getLocalPaintStyles()` 一致，
+   *     SOLID 颜色逐值相同
+   *   - 火车票（旧编码）：4 条（"渐变" / "f1f4fb" / "1" / "2"），与既有基线一致
    *
    * @param fileKey UUID（如 890c5c78-...），用于拉取 /data 二进制
-   * @param fileId 数字 documentId（如 115278536821990），用于筛 ukey 前缀
+   * @param fileId 数字 documentId（如 115278536821990），用于判定本文件样式
    */
   async getLocalStyles(fileKey: string, fileId: string): Promise<any> {
     const { listLocalPaintStyles } = await import("./node-tree.js");
     const buf = await this.fetchData(fileKey);
     return listLocalPaintStyles(buf, fileId);
+  }
+
+  /**
+   * 文件本地文字样式列表（TEXT）。
+   *
+   * 实测（2026-09 移动端界面设计）：13/13 条 id/name/fontSize/lineHeight 与浏览器
+   * `getLocalTextStyles()` 真值完全一致。
+   *
+   * @param fileKey UUID，用于拉取 /data 二进制
+   * @param fileId 数字 documentId，用于判定本文件样式
+   */
+  async getLocalTextStyles(fileKey: string, fileId: string): Promise<any> {
+    const { listLocalTextStyles } = await import("./node-tree.js");
+    const buf = await this.fetchData(fileKey);
+    return listLocalTextStyles(buf, fileId);
+  }
+
+  /**
+   * 文件本地效果样式列表（EFFECT）。
+   *
+   * 实测（2026-09 移动端界面设计）：6/6 条 id/name 与浏览器 `getLocalEffectStyles()` 一致；
+   * color（含 alpha）全部一致；radius / offsetY 在二进制中有该字段时全部一致，
+   * 字段缺省时为 null（缺省规律未解明，见 node-tree.ts 的 EffectItem 注释）。
+   */
+  async getLocalEffectStyles(fileKey: string, fileId: string): Promise<any> {
+    const { listLocalEffectStyles } = await import("./node-tree.js");
+    const buf = await this.fetchData(fileKey);
+    return listLocalEffectStyles(buf, fileId);
+  }
+
+  /**
+   * 文件本地变量（Design Tokens）列表。
+   *
+   * ⚠️ 实测认知：MasterGo 的「变量」与「样式」是**同一批对象** —— 浏览器真值里
+   * getLocalPaintStyles/getLocalTextStyles/getLocalEffectStyles 的 id 集合与
+   * variables.getVariables() 的 id 集合双向完全包含。本方法即该索引表的统一视图。
+   *
+   * 实测（2026-09 移动端界面设计）：57/57 条 id/name/type 与浏览器 `variables.getVariables()` 一致。
+   */
+  async getLocalVariables(fileKey: string, fileId: string): Promise<any> {
+    const { listLocalVariables } = await import("./node-tree.js");
+    const buf = await this.fetchData(fileKey);
+    return listLocalVariables(buf, fileId);
   }
 
   // ---- /mcp/* 网关接口已完全移除（不依赖官方 MCP，走纯网页 API 自研） ----
