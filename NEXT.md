@@ -129,9 +129,9 @@
   免 `npx tsx`、免 node_modules。
 - `npm run build`（tsc）+ `npm run build:bundle`（`node scripts/build.mjs`）→ `dist/index.cjs`，spawn 校验可启动到 MCP server 就绪。
 
-### 9. 设计稿差异对比 / 图片切图导出
+### 9. 设计稿差异对比（切图导出已暂缓）
 - diff：基于现有 `get_page_tree` 输出做两份快照的节点 diff，不阻塞。
-- 切图：**先调研** MasterGo 是否有可用导出 HTTP 接口（`window.mg` 里未见导出函数），可行才动手。
+- 切图 / 图片导出：**⚠️ 暂不考虑**（`window.mg` 里未见导出函数，逆向难度高）——**明确不主动做**，待开发者后期指明要求后再启动。
 
 ---
 

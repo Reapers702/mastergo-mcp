@@ -168,7 +168,7 @@ src/
   - **重大认知纠正**：MasterGo 的**「变量」与「样式」是同一批对象**。浏览器真值交叉验证：`getLocalPaintStyles()` + `getLocalTextStyles()` + `getLocalEffectStyles()` 的 id 集合与 `variables.getVariables()` 的 id 集合**双向完全包含**（各 57 个），变量 `type` 分布恰为 `{PAINT: 38, EFFECT: 6, TEXT: 13}`。即样式 API 是「按 type 过滤的视图」、变量 API 是「统一视图」，二者共用同一张索引表 —— **破解变量 = 破解样式**。
   - **`M:1` / `M:2` 是真实 id**（纠正旧说法）：真值 `getCollections()` 返回 `[{id:"M:1", name:"集合", isExternal:false, modes:[{id:"M:2", name:"模式 1"}]}]`，并非客户端凭空构造的 pseudo-id；变量组 id 形如 `M:1_Neutrals`、`M:1_外部/Carbon Neutral`。
   - 未输出：`scopes`（二进制内未定位到该字段）、`codeSyntax`、多模式值（本文件仅 1 个模式 `M:2`）。
-- [ ] **图片/切图导出**：节点导出为 PNG/SVG/PDF，可交付到本地目录
+- [ ] **图片/切图导出**：节点导出为 PNG/SVG/PDF，可交付到本地目录。**⚠️ 暂不考虑**（`window.mg` 未见导出函数，功能缺口虽大但逆向难度高）——待开发者后期指明要求再做，见 NEXT.md。
 - [ ] **设计稿差异对比**：两份文件/版本间节点 diff
 - [x] **Cookie 过期检测 / 错误归一化**：`MasterGoError` + `toMasterGoError` 覆盖全部请求路径（含 `/data` 的 `arraybuffer` 错误体解码）。实测 `403 AccessDenied`（Cookie 失效 / 无权限）、`403 NotAllowAnonymousAccess`（文件未公开）、`NoDocumentPermission`、`NotFoundDocument`、`10003` 均给出可操作的中文提示；此前 `/data` 绕过归一化，失效时抛出**空消息**的原始 axios 错误，现已修复。
 - [ ] **打包发布**：`npm pack` / 单文件二进制（esbuild），免 npx tsx 依赖

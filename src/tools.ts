@@ -12,7 +12,7 @@
  *   - list_effect_styles：文件本地效果样式（EFFECT，阴影/模糊）
  *   - list_variables：文件本地变量（Design Tokens；实测与「样式」是同一批对象）
  *   - list_components：文件本地组件（COMPONENT/COMPONENT_SET，无独立编码表，本质是带自引用 ukey 的容器节点）
- * 仍待加入：图片/切图导出。
+ * 仍待加入：图片/切图导出（**暂不考虑**，待开发者后期指明再做，见 NEXT.md）。
  *
  * 样式与变量共用一张「样式索引表」，其类型判别式是记录内的 `05 <n>`：
  * n=1 → PAINT、n=2 → EFFECT、n=3 → TEXT（实测 57/57 纯净）。详见 node-tree.ts。
