@@ -70,7 +70,7 @@ npx tsx src/index.ts --cookie "gfsessionid=..." --url https://mastergo.com
 | `get_page_tree` | 指定页面节点树：id、名称、类型、父节点 id、父子层级（支持限深展开）。`page` 可省略，自动取 URL 的 `page_id` | `/data/{fileKey}` 二进制节点树解码 |
 | `list_styles` | 文件本地颜色样式（PAINT）：id、名称、collection、ukey、RGBA（渐变含 **type/stops/手柄**） | `/data/{fileKey}` 二进制样式索引表 + paint 定义表 + 渐变 paint 图元 |
 | `list_text_styles` | 文件本地文字样式（TEXT）：id、名称、字体名、字号、行高、字体 hash | `/data/{fileKey}` 二进制样式索引表（`05 03` 子块） |
-| `list_effect_styles` | 文件本地效果样式（EFFECT）：id、名称、颜色（含 alpha）、模糊半径、Y 偏移 | `/data/{fileKey}` 二进制样式索引表 + 效果定义表 |
+| `list_effect_styles` | 文件本地效果样式（EFFECT）：id、名称、颜色（含 alpha）、模糊半径、X/Y 偏移、类型、spread | `/data/{fileKey}` 二进制样式索引表 + 效果定义表 |
 | `list_variables` | 文件本地变量（Design Tokens）：id、名称、type、collection、ukey、颜色 | `/data/{fileKey}` 二进制样式索引表（**实测与「样式」是同一批对象**） |
 
 ### 推荐工作流
@@ -159,9 +159,9 @@ src/
     - 定位锚点用 `07 <ukey>\0`（样式记录独有，可排除大量形似的节点记录：不过滤时新文件匹配 225 条，过滤后恰为 57 条真值）
     - 本文件判定**不能**只靠 `ukey.startsWith(fileId + "+")`：新编码下必然 0 命中（这正是 `list_styles` 曾经的漏检 bug）
   - **paint 定义表**：`01 <paintId>\0 02 <styleId>\0 03 61 30 00 04 00 08 <A><R><G><B>`，RGBA 走紧凑浮点。⚠️ paint 图元 id 可**省略数字前缀**（形如 `:005`），用严格的 `^\d+:\d+$` 校验会把整条记录跳过，导致所有样式颜色解成 `null`。
-  - **效果定义表**：`01 <effectId>\0 02 <refId>\0 03 61 <c> 00 04 00 05 <n> 08 <alpha><R><G><B> [09 <radius>] [0b <offsetY>] 0e 01 00`（与 paint 表的区别是 `04 00` 后多一个 `05 <n>`；0 值用单字节 `00`，非 0 用 4 字节紧凑浮点）。实测 6 个效果样式全部命中（`0:7861` 含 3 个阴影 → 表内恰好 3 条）。
-    - **已知局限**：`09`/`0b` 会**整字段缺省**，且缺省**不等于 0**（实测有 offsetY=4 却无 `0b`、radius=10 却无 `09` 的条目）。现有素材仅 6 个样式 / 8 个效果项，样本不足以解出缺省规律，故按「宁可判空也不猜错」输出 `null`。
-    - `offsetX` / `spread` / `type`（INNER_SHADOW、LAYER_BLUR、BACKGROUND_BLUR）在现有素材中**全是默认值**，无从验证，暂不输出。
+  - **效果定义表**：`01 <effectId>\0 02 <refId>\0 03 61 <c> 00 04 00 05 <n> 08 <alpha><R><G><B> <09 <radius>> <0a <offsetX>> <0b <offsetY>> <0d <type>> <0e <2B>> <0f <spread>>`。0 值用单字节 `00`，非 0 用 4 字节紧凑浮点；`0d` 单字节 1=DROP_SHADOW、`0f`（spread）紧凑浮点，**负号=mantissa 最低字节 bit0 为 1**。`03 61` 后的 `<c>` 是**变长 C 字符串**（legacy 单字节如 `34`、antd5 多字节如 `4d 20 20 26`），须按 `readCstr` 读取而非硬编码单字节。
+    - **顺序规则（关键）**：同一效果样式的多条效果项物理上**分散**在多个 `01 <effectId>` 定义记录里，且字节序与浏览器 API 真值**不一致**；需按每条 `01 <effectId>` 的**数字后缀降序**排序后才与真值完全对齐（antd5 34/34、90/90 项验证）。
+    - **缺省规律（2026-09 破析）**：legacy 下 `09`/`0b` 会**整字段缺省**且缺省**不等于 0**，但 antd5（modern 编码）34 个效果样式 90 个效果项**全部含 09/0a/0b/0f**、无缺省反例 —— 说明缺省是 legacy 旧编码的历史行为。现按「字段出现则取值、未出现输出 null」处理。
   - **文字样式子块**（`05 03` 之后）：`02 <3B 字体族 id> 03 <字体名>\0 04 <紧凑浮点 fontSize> 05 <紧凑浮点 lineHeight> 06 <1B> 0b <1B> 0c <PostScript 名>\0 0e <紧凑浮点 fontSize×1.2> 0f <字体 hash>\0`。`0e` 恒为 fontSize×1.2（12→14、16→19、20→24、40→48 全部验证通过）。`06`/`0b` 在 13 个样式中恒为 `01`（对应 textCase=ORIGINAL），枚举语义无从取样故不输出。
     - ⚠️ 输出的 `fontName.family` 由 PostScript 名按最后一个 `-` 拆分，可能是**压缩形式**（二进制存 `OpenSans`，真值 API 返回 `Open Sans`）；需要精确字体名请用 `fontPostScriptName`。
   - 渐变样式（GRADIENT_LINEAR/RADIAL）已破解（2026-09）：渐变 paint 图元 `01 <selfId>\0 02 <refId>\0 03 61 <sub> 00 05 <kind> 08 …` 中 `<kind>` 判别类型（1=LINEAR、2=RADIAL），`08` 后是多色 stops + 手柄。紧凑数字约定 **0 值压成单字节 0x00、非 0 用 4 字节紧凑浮点**；stop 颜色按 **a,r,g,b** 顺序；stop0=`<color><position>`、其余= `01 <position> 02 <color>`；手柄 `0a 03 <h0> [04 <h1>]`（RADIAL 存两对、LINEAR 只存一对，第二个由轴默认推导未编码）。渐变 paint 的 refId 即所属样式 id，故按 refId 聚合到该样式。实测火车票 `渐变` 样式两笔渐变的 stops/handles 与浏览器真值**逐位一致**。
@@ -214,15 +214,15 @@ src/
 - **仍未解出**：`textCase` / `decoration` / `letterSpacing` —— 现有 13 个样式里这三个字段**全是同一个值**（ORIGINAL / NONE / 0），无法验证枚举语义。要继续需取样一个**含多种 textCase（UPPER/LOWER/TITLE）且 letterSpacing 非 0** 的设计稿。
 
 ### ③ 效果样式表（Effect Styles）—— ✅ 已完成（2026-09，含已知局限）
-- **已实现**：`list_effect_styles` 工具。实测 **6/6** 条 id/name 与 `getLocalEffectStyles()` 一致，color（含 alpha）8/8 一致，radius/offsetY 在有该字段时全部一致。
-- **关键结论**：效果样式的**值不在样式索引记录里**（那里只有 `05 02 00 00`），而在**独立的效果定义表**中，表内 `02 <refId>` 指向样式 id：
-  `01 <effectId>\0 02 <refId>\0 03 61 <c> 00 04 00 05 <n> 08 <alpha><R><G><B> [09 <radius>] [0b <offsetY>] 0e 01 00`
-  - 与 paint 定义表的区别：`04 00` 后**多一个 `05 <n>`**
-  - 0 值用单字节 `00` 表示，非 0 才写 4 字节紧凑浮点
-  - 定位技巧：`0:7861` 含 3 个阴影 → 表内恰好 3 条 `02 "0:7861"`，可据此确认表结构
-- **已知局限（下一步最值得做的逆向）**：`09`/`0b` 会**整字段缺省**，且缺省**不等于 0**（实测 `0:3140` 无 `0b` 而真值 offsetY=4；`0:7861` 某条无 `09` 而真值 radius=10）。现有素材仅 6 个样式 / 8 个效果项，样本不足以解出规律，故缺省时输出 `null`。
-  **如何继续**：打开一个**阴影样式多、且 offsetY/radius 取值分散**的设计稿导真值，观察缺省与哪些字段相关（怀疑与某个「默认值继承」或 `05 <n>` 计数有关）。
-- **另需取样**：`offsetX` / `spread` / `type`（INNER_SHADOW、LAYER_BLUR、BACKGROUND_BLUR）在现有素材中全是默认值，无从验证。
+- **已实现**：`list_effect_styles` 工具。**Ant Design 5 文件（antd5，34 样式 / 90 效果项）全量受检**：id/name 逐条一致，color/radius/offsetX/offsetY/type/spread **90/90 项与 `getLocalEffectStyles()` 真值完全一致**（含顺序）。legacy 火车票 6 样式回归仍 PASS。
+- **关键结论**：效果样式的**值不在样式索引记录里**（那里只有 `05 02 00 00`），而在**独立的效果定义表**中，表内 `02 <refId>` 指向样式 id、`01 <effectId>` 是该效果项自身 id：
+  `01 <effectId>\0 02 <refId>\0 03 61 <c> 00 04 00 05 <n> 08 <alpha><R><G><B> <09 <radius>> <0a <offsetX>> <0b <offsetY>> <0d <type>> <0e <2B>> <0f <spread>>`
+  - 与 paint 定义表的区别：`04 00` 后**多一个 `05 <n>`**；0 值用单字节 `00` 表示，非 0 才写 4 字节紧凑浮点
+  - `0d` 单字节类型（1=DROP_SHADOW）；`0f`（spread）紧凑浮点、**负号=mantissa 最低字节 bit0 为 1**
+  - `03 61` 后的 `<c>` 是**变长 C 字符串**（antd5 多字节如 `4d 20 20 26`），不可硬编码为单字节
+  - **顺序**：同一款式的效果项字节序与 API 真值不一致，按 `01 <effectId>` **数字后缀降序**排序后才对齐（34/34、90/90 验证）
+- **缺省规律（2026-09 破析，旧「已知局限」已解决）**：legacy 旧编码下 `09`/`0b` 会**整字段缺省**且缺省≠0；但 **antd5（modern 编码）34 样式 / 90 个效果项全部含 `09`/`0a`/`0b`/`0f`、无缺省反例** —— 缺省是 legacy 的旧编码行为，非通用规律。现按「字段出现则取值、未出现则 null」输出。
+- **另需取样**：`type` 仅取样到 1=DROP_SHADOW，INNER_SHADOW / LAYER_BLUR / BACKGROUND_BLUR 的 `0d` 字节值未验证；`0e` 的 2 字节语义仍未知。
 
 ### ④ 组件列表（Components）—— ✅ 已完成（2026-09-20）
 - **已实现**：`list_components` 工具交付，按文件返回本地组件（id/name/ukey/isExternal/parentId/pageId/width/height）。

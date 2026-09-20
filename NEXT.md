@@ -7,7 +7,7 @@
 **9 个工具**可用：`get_file_meta` / `list_pages` / `get_file_nodes` / `get_page_tree` / `list_styles` / `list_text_styles` / `list_effect_styles` / `list_variables` / `list_components`。
 
 - 节点树：legacy 828/828（0 错判）、modern 命中 8.3%（容器仍返回 `null`）
-- **样式与变量：已全面打通**，与浏览器真值逐条一致 —— 颜色 38/38、文字 13/13、效果 6/6、变量 57/57
+- **样式与变量：已全面打通**，与浏览器真值逐条一致 —— 颜色 38/38、文字 13/13、效果 **34/34（antd5，90/90 项含全字段）**、变量 57/57
 - **组件：已打通（2026-09-20）**，`list_components` 交付，火车票 96/96 与真值一致
 
 ---
@@ -98,15 +98,18 @@
 
 ## P1 · 有真值就能继续做（真值导出已通，门槛只剩「取样」）
 
-### 4. 效果样式的 `09`/`0b` 缺省规律 ⭐ 最值得做
-- **现象**：效果定义表里 `09`(radius) / `0b`(offsetY) 会**整字段缺省**，而缺省**不等于 0**。
-  实测 `0:3140` 无 `0b` 但真值 offsetY=4；`0:7861` 某条无 `09` 但真值 radius=10。
-- **为何难**：当前文件只有 **6 个效果样式**、8 个效果项，样本太少。
-- **入口**：用浏览器打开一个**阴影样式多、且 offsetY/radius 取值分散**的设计稿，导真值，
-  看缺省与哪些字段相关（怀疑与某个「默认值继承」或 `05 <n>` 计数有关）。
-- **收益**：`list_effect_styles` 的 radius/offsetY 从「有字段才给」变为完整。
-- **另需取样**：`offsetX` / `spread` / `type`（INNER_SHADOW / LAYER_BLUR / BACKGROUND_BLUR）
-  在现有素材中**全部是默认值**，无从验证。
+### 4. 效果样式的 `09`/`0b` 缺省规律 + 全字段解码 —— ✅ 已完成（2026-09）
+- **现象**：legacy 效果定义表里 `09`(radius) / `0b`(offsetY) 会**整字段缺省**，而缺省**不等于 0**
+  （实测 `0:3140` 无 `0b` 但真值 offsetY=4；`0:7861` 某条无 `09` 但真值 radius=10）。
+- **破析结论**：用 Ant Design 5 文件（antd5，34 样式 / **90 个效果项**）取样后确认 —— **modern 编码下
+  `09`/`0a`/`0b`/`0f` 全部显式出现、无缺省反例**，故缺省是 legacy 旧编码的历史行为，非通用规律。
+  现按「字段出现则取值、未出现则输出 null」。
+- **连带突破**：效果项**全字段**（color/radius/offsetX/offsetY/type/spread）已在 antd5 上 90/90 解出，
+  与 `getLocalEffectStyles()` 真值逐项一致（含顺序）。`type` 用 `0d`（1=DROP_SHADOW）、`spread` 用 `0f`
+  （负号=mantissa 最低字节 bit0）。**顺序规律**：同一样式多项分散在多个 `01 <effectId>` 记录且字节序
+  与 API 不一致，需按 `01 <effectId>` **数字后缀降序**排序。
+- **另需取样**：`type` 仅取样到 1=DROP_SHADOW，INNER_SHADOW / LAYER_BLUR / BACKGROUND_BLUR 的 `0d`
+  字节值未验证；`0e` 的 2 字节语义仍未知。
 
 ### 5. 渐变样式的 stops 多色解码 —— ✅ 已完成（2026-09）
 - 真值（`gradientStops` 含 position + RGBA、`gradientHandlePositions`、`transform`、`type`）已拿到并存盘 `.cache/gradient_truth.json`。

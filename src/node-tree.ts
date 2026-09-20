@@ -1304,9 +1304,13 @@ function scanStyleIndex(buf: Buffer, fileId: string): StyleIndexRecord[] {
   const out: StyleIndexRecord[] = [];
 
   for (let i = 0; i + 8 < buf.length; i++) {
-    if (!(buf[i] === 0x03 && buf[i + 1] === 0x61 && buf[i + 3] === 0x00)) continue;
+    if (!(buf[i] === 0x03 && buf[i + 1] === 0x61)) continue;
+    // `03 61 <c>`：c 是**变长 C 字符串**（legacy 多为单字节如 `34`，antd5 有多字节如 `49 38` / `4d 20 20 26`）。
+    // 旧的硬编码 `<c 单字节>\0`（buf[i+3]===0）会漏掉 antd5 的多字节 c，改按 C 字符串读取。
+    const c = readCstr(buf, i + 2);
+    if (!c) continue;
     // `04 <desc>` 在旧编码里可能整体省略（火车票部分记录直接 `03 61 XX 00 05 …`），故为可选
-    let p05 = i + 4;
+    let p05 = c.next;
     let descText = "";
     if (buf[p05] === 0x04) {
       const d = readCstr(buf, p05 + 1);
@@ -1492,22 +1496,29 @@ export function listLocalTextStyles(buf: Buffer, fileId: string): TextStyle[] {
  * 效果样式中的一个效果项（阴影/模糊）。
  *
  * ⚠️ 只有部分字段能从 `/data` 可靠解出：
- *   - `color`（含 alpha）：来自效果定义表 `08 <alpha> <R> <G> <B>`，8/8 与真值一致
- *   - `radius`：来自 `09`，**有该字段时 4/4 一致**；字段缺省时为 null
- *   - `offsetY`：来自 `0b`，**有该字段时 4/4 一致**；字段缺省时为 null
+ *   - `color`（含 alpha）：来自「效果定义表」`08 <alpha> <R> <G> <B>`
+ *   - `radius`：`09`
+ *   - `offsetX`：`0a`
+ *   - `offsetY`：`0b`
+ *   - `type`：`0d`（单字节，1=DROP_SHADOW）
+ *   - `spread`：`0f`（紧凑浮点，mantissa 最低字节 bit0=1 为负）
  *
- * 已知局限（2026-09，见 README）：`09`/`0b` 会**整字段缺省**，而缺省并不等于 0
- * （实测 `0:3140` 无 `0b` 而真值 offsetY=4、`0:7861` 某条无 `09` 而真值 radius=10）。
- * 缺省规律在现有 6 个效果样式上无法确定，故按「宁可判空也不猜错」输出 null。
- * `offsetX` / `spread` / `type`（DROP_SHADOW 等）尚未取样到非默认值，同样不输出。
+ * 字段按**是否在记录中出现**解码：出现则取值，未出现则为 null。
+ * 注意缺省并不等于 0（见下方说明），故沿用「宁可判空也不猜错」策略。
  */
 export interface EffectItem {
   /** 颜色（RGBA）；`08` 后的 RGB 与 alpha */
   color: NodeColor | null;
   /** 模糊半径（`09`）；字段缺省时为 null */
   radius: number | null;
+  /** 阴影 X 偏移（`0a`）；字段缺省时为 null */
+  offsetX: number | null;
   /** 阴影 Y 偏移（`0b`）；字段缺省时为 null */
   offsetY: number | null;
+  /** 阴影类型（`0d` 单字节，1=DROP_SHADOW）；other 类型未取样 */
+  type: string | null;
+  /** 阴影扩展（`0f`）；负号=紧凑浮点 mantissa 最低字节 bit0 为 1 */
+  spread: number | null;
 }
 
 /** 效果样式（EFFECT）。 */
@@ -1532,21 +1543,51 @@ function readFloatOrZero(buf: Buffer, p: number): { value: number; next: number 
 /**
  * 扫描「效果定义表」，返回 refId（效果样式 id 或节点 id）→ 效果项列表。
  *
- * 条目格式（2026-09 破解，与 paint 定义表的区别是 `04 00` 后多一个 `05 <n>`）：
- *   `01 <effectId> \0 02 <refId> \0 03 61 <c> 00 04 \0 05 <n> 08 <alpha><R><G><B> [09 <radius>] [0b <offsetY>] 0e 01 00`
- * 实测：移动端界面设计的 6 个效果样式全部在此表中命中（`0:7861` 含 3 个阴影 → 表内 3 条）。
+ * 条目锚点：`03 61 <c> 00 04 00 05 ... 08 <alpha><R><G><B> ...`
+ *   - legacy（移动端界面，火车票）：`05 <n> 08`，字段仅 `09`/`0b`
+ *   - modern（Ant Design 5，antd5）：`05 <n> 06 <m> 07 <k> 08`，字段 `09`/`0a`/`0b`/`0d`/`0f`
+ *
+ * 效果项 tag 序列（modern，字段按出现解码；未出现字段返回 null）：
+ *   `08 <alpha> <R> <G> <B> 09 <radius> 0a <offsetX> 0b <offsetY> 0d <type> 0e <2B> 0f <spread>`
+ * 注意：
+ *   - `09`/`0a`/`0b` 均为“紧凑浮点或单字节 00”（0 用 1 字节，非 0 用 4 字节）；
+ *   - `0d` 为单字节 type（1=DROP_SHADOW）；`0e` 后跟 2 字节（未知，跳过）；
+ *   - `0f`（spread）为紧凑浮点，**负号 = mantissa 最低字节 bit0 为 1**（先取绝对值再判负）。
  */
 function scanEffectTable(buf: Buffer): Map<string, EffectItem[]> {
-  const table = new Map<string, EffectItem[]>();
+  // 内部先按 refId 收集「效果项 + 其自身 id（`01 <id>`）」，再按序输出。
+  // 顺序规则（antd5 反打实测 34/34）：同一效果样式的多条效果项，其**读取顺序（按字节地址）
+  // 与浏览器 API 真值顺序不一致**，但按各自 `01 <selfId>` 的**数字后缀降序**排序后与真值完全对齐。
+  const raw = new Map<string, Array<{ selfKey: number; item: EffectItem }>>();
 
   for (let i = 0; i + 12 < buf.length; i++) {
-    // 锚点：`03 61 <c> 00 04 00 05 <n> 08`（paint 定义表在此处是 `04 00 08`，无 05）
-    if (!(buf[i] === 0x03 && buf[i + 1] === 0x61 && buf[i + 3] === 0x00 &&
-          buf[i + 4] === 0x04 && buf[i + 5] === 0x00 &&
-          buf[i + 6] === 0x05 && buf[i + 8] === 0x08)) continue;
+    // 锚点：`03 61 <c> 04 00 <05|06|07>`。c 是变长 C 字符串（legacy 单字节、antd5 多字节），
+    // 故用 `03 61` + readCstr 定位 c 末端，再向后找 `05`，最后定位 `08` 效果项起点。
+    if (!(buf[i] === 0x03 && buf[i + 1] === 0x61)) continue;
+    const cc = readCstr(buf, i + 2);
+    if (!cc) continue;
+    if (buf[cc.next] !== 0x04 || buf[cc.next + 1] !== 0x00) continue;
 
-    // 回溯 `01 <effectId>\0 02 <refId>\0`
+    // 向后找 `05 <n>`（legacy 紧跟 08；modern 后跟 06/07 再长 ukey 后 08）
+    let p = cc.next + 2;
+    let found05 = false;
+    for (; p < Math.min(i + 12, buf.length); p++) {
+      if (buf[p] === 0x05) { found05 = true; break; }
+    }
+    if (!found05) continue;
+    // 从 `05` 之后向后找 `08`（效果项起点，alpha 前）。modern 的 `05` 块后有多条字段 + ukey，窗口放宽。
+    let p08 = -1;
+    for (let q = p + 1; q < Math.min(p + 40, buf.length); q++) {
+      if (buf[q] === 0x08) { p08 = q; break; }
+    }
+    if (p08 < 0) continue;
+    // 在 `05` 前的计数器处可能有 `04 00`，需要排除 paint 定义表（paint 也有 03 61 04 00）：
+    // paint 表在 `04 00` 后直接 `08`，无 `05`；effect 表必有 `05`。上面已要求找到 05，故不冲突。
+
+    // 回溯 `01 <effectId>\0 02 <refId>\0`。refId 实测即该效果所属的效果样式 id；
+    // effectId（`01 <id>`）是该效果项自身的 id，其数字后缀决定同一样式内多项的排序键。
     let refId: string | null = null;
+    let selfKey = -1;
     for (let j = i - 1; j >= Math.max(0, i - 120); j--) {
       if (buf[j] !== 0x01) continue;
       const ca = readCstr(buf, j + 1);
@@ -1555,36 +1596,70 @@ function scanEffectTable(buf: Buffer): Map<string, EffectItem[]> {
       const cb = readCstr(buf, ca.next + 1);
       if (!cb || !ID_RE.test(cb.s) || cb.next !== i) continue;
       refId = cb.s;
+      const colon = ca.s.lastIndexOf(":");
+      selfKey = Number(ca.s.slice(colon + 1));
       break;
     }
     if (!refId) continue;
 
-    let p = i + 9; // 08 之后
-    const alpha = readFloatOrZero(buf, p); p = alpha.next;
-    const r = readFloatOrZero(buf, p); p = r.next;
-    const g = readFloatOrZero(buf, p); p = g.next;
-    const b = readFloatOrZero(buf, p); p = b.next;
+    let p2 = p08 + 1; // 08 之后
+    const alpha = readFloatOrZero(buf, p2); p2 = alpha.next;
+    const r = readFloatOrZero(buf, p2); p2 = r.next;
+    const g = readFloatOrZero(buf, p2); p2 = g.next;
+    const b = readFloatOrZero(buf, p2); p2 = b.next;
 
     let radius: number | null = null;
+    let offsetX: number | null = null;
     let offsetY: number | null = null;
-    while (p < buf.length && buf[p] !== 0x00) {
-      const tag = buf[p];
-      if (tag === 0x09) { const v = readFloatOrZero(buf, p + 1); radius = v.value; p = v.next; }
-      else if (tag === 0x0b) { const v = readFloatOrZero(buf, p + 1); offsetY = v.value; p = v.next; }
-      else break; // 未知字段：停止解析，不猜
+    let type: string | null = null;
+    let spread: number | null = null;
+    let guard = 0;
+    while (p2 < buf.length && guard++ < 40) {
+      const tag = buf[p2];
+      if (tag === 0x09) { const v = readFloatOrZero(buf, p2 + 1); radius = v.value; p2 = v.next; }
+      else if (tag === 0x0a) { const v = readFloatOrZero(buf, p2 + 1); offsetX = v.value; p2 = v.next; }
+      else if (tag === 0x0b) { const v = readFloatOrZero(buf, p2 + 1); offsetY = v.value; p2 = v.next; }
+      else if (tag === 0x0d) { type = readEffectTypeName(buf[p2 + 1]); p2 += 2; }
+      else if (tag === 0x0e) { p2 += 2; } // 0e 后跟 1 值字节
+      else if (tag === 0x0f) {
+        // spread：紧凑浮点，负号=mantissa 最低字节 buf[p2+2] bit0
+        if (buf[p2 + 1] === 0x00) { spread = 0; p2 += 2; }
+        else {
+          let v = readCompactFloat(buf, p2 + 1);
+          if (buf[p2 + 2] & 1) v = -v;
+          spread = v;
+          p2 += 5;
+        }
+      }
+      else break; // 未知字段 / 记录结束（00 分隔符）：停止解析，不猜
     }
 
     const item: EffectItem = {
       color: { r: r.value, g: g.value, b: b.value, a: alpha.value },
       radius,
+      offsetX,
       offsetY,
+      type,
+      spread,
     };
-    const list = table.get(refId);
-    if (list) list.push(item);
-    else table.set(refId, [item]);
+    const list = raw.get(refId);
+    if (list) list.push({ selfKey, item });
+    else raw.set(refId, [{ selfKey, item }]);
   }
 
+  // 同一 refId（效果样式）的多条效果项，按 `01 <selfId>` 数字后缀降序排列。
+  const table = new Map<string, EffectItem[]>();
+  for (const [refId, items] of raw) {
+    items.sort((a, b) => b.selfKey - a.selfKey);
+    table.set(refId, items.map((x) => x.item));
+  }
   return table;
+}
+
+/** 效果类型名映射（`0d` 单字节）。仅取样到 1=DROP_SHADOW。 */
+function readEffectTypeName(t: number): string {
+  if (t === 1) return "DROP_SHADOW";
+  return `UNKNOWN(${t})`;
 }
 
 /**
