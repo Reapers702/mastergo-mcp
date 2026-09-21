@@ -151,6 +151,31 @@
 - `npm run test:diff`（`scripts/verify-diff.ts`）为纯内存自检，不依赖网络/二进制。
 - 切图 / 图片导出：**⚠️ 暂不考虑**（`window.mg` 里未见导出函数，逆向难度高）——**明确不主动做**，待开发者后期指明要求后再启动。
 
+### 10. CI 与端到端验证 —— ✅ 已完成（2026-09-21）
+- **GitHub Actions**（`.github/workflows/ci.yml`）：push/PR 触发，跑 `npm ci` → `tsc` → `test:diff` → `test:regress` → `build:bundle` → `test:e2e`。
+  `test:regress` 用公开文件（无需 Cookie）可在 CI 跑，并用 `MG_REGRESS_CACHE` 落盘 + `actions/cache`（key `mg-regress-v1`）复用二进制快照，命中时跳过 47MB 下载。
+- **端到端**（`npm run test:e2e`，`scripts/e2e-mcp.ts`）：以真实 MCP 客户端身份 spawn `dist/index.cjs`，
+  走 JSON-RPC stdio 全链路 —— initialize → tools/list（断言 10 个工具）→ 依次调用
+  `get_file_meta` / `list_pages` / `get_page_tree` / `diff_files` / `get_file_nodes` / `list_styles`，
+  **基于 Ant Design 5 官方公开文件（antd5，modern 格式，74 页，无 Cookie）**，首次全量下载 ~106MB、进程内缓存复用。
+- **现代格式补全（2026-09-21）**：
+  - `parsePageBlocks`（`list_pages` 的页面列表）新增 **modern 头部索引**解析：文件头
+    `09 02 01 04 02 00 03 <count>` 后扫描 `01 <id>\0 02 <name>\0` 页面块（块后附 03/04/06 等字段，
+    故按 count 扫描式提取）；legacy 双 marker 扫描保留为回退路径。
+  - `parseNodeBlocks`（`get_file_nodes` 的全量节点索引）新增 **modern 节点扫描**：与 `parsePageTree`
+    共用 `01 <id>\0` 语义，页面列表复用 `parsePageBlocks` 头部索引（正文里「02 非 id」记录
+    可能是实例引用名，不能当页面判定），name 优先 `04` 字段、回退 `02`。
+  - 实测（antd5）：`list_pages` 74 页 ✓、`get_file_nodes` 144055 节点 ✓、`get_page_tree`/`diff_files` 正常；
+    miniapp_proto 3 页、proto_wireframe 2 页同样命中；legacy 火车票回归不变（55 页 / 7481 节点）。
+  - antd5 的 `list_styles` 返回 0 条**是预期行为**：其 445 个样式 ukey 全部来自外部团队库
+    （`122691166044911`/`103110469595854`/`115975140108529`），文件本身无本地样式。
+- **样本分工（最终决定 2026-09-21）**：`test:regress` 继续用**火车票（legacy）**做 CI 回归 ——
+  legacy 与 modern 是两套编码，必须各留一个守卫；火车票虽为公司内部稿，但文件本身 `isPublic`、
+  匿名可下载，且真值（`train_ticket_truth.json`）与样式基线已入库，是现成可用的 legacy 样本。
+  antd5 仅作为 **e2e 的 modern 样本**，不替代 regress。
+- 本地实测（2026-09-21）：全链路 PASS（tools 10/10、list_pages 74 页、get_page_tree 400 节点、
+  get_file_nodes 144055 节点、diff_files 汇总正确）；`test:regress` 火车票 legacy 守卫 PASS。
+
 ---
 
 ## P3 · 已知局限（已评估，暂不建议动）
@@ -176,12 +201,14 @@
 | --- | --- |
 | `test/fixtures/truth_mobile_kit.json` | **已入库**：移动端界面设计全部真值（样式 57 + 组件 144 + 变量 57 + 集合/组），供 `npm run test:styles` 使用 |
 | `.cache/mg_mobile_kit.bin` | 该文件 `/data` 快照，6.2MB |
-| `.cache/train_ticket.bin` | 火车票 `/data` 快照，47.9MB（公开） |
+| `.cache/train_ticket.bin` | 火车票 `/data` 快照，47.9MB（公开，legacy 回归样本） |
+| `.cache/antd5.bin` | Ant Design 5 `/data` 快照，105.8MB（公开，modern e2e 样本） |
 | `.cache/post_server.cjs` | 真值导出用的本地 POST 接收器 |
 
 文件 id：
 - 移动端界面设计（**私有**）`107389953208823` / fileKey `2b195a62-0d3e-40ee-b55f-59b607e729a0`
 - 火车票（公开）`115278536821990` / fileKey `890c5c78-a533-4751-91ef-06e3fbb70d5e`
+- Ant Design 5（公开）`205140012617682` / fileKey `010e341a-0eae-49c9-a538-87932df0307d`
 
 **`/data` 接口三个反直觉特性**
 1. **不可字节复现**：同一未变动文件连续下载 md5 不同 → 回归按结构比对，别用 md5 / 整文件 diff

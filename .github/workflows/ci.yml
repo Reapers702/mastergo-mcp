@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type check (tsc)
+        run: npm run build
+
+      - name: Unit self-check (diff, 纯内存)
+        run: npm run test:diff
+
+      - name: Regression (node-tree 类型解码, 火车票公开文件)
+        # /data 二进制不可字节复现, 用 MG_REGRESS_CACHE 落盘 + actions/cache 复用,
+        # 命中缓存时直接用本地快照跳过 47MB 下载。
+        run: |
+          mkdir -p "$HOME/.cache/mg"
+          if [ -f "$HOME/.cache/mg/regress.bin" ]; then
+            export MG_REGRESS_SRC="$HOME/.cache/mg/regress.bin"
+          fi
+          export MG_REGRESS_CACHE="$HOME/.cache/mg/regress.bin"
+          npm run test:regress
+        env:
+          CI: true
+      - name: Cache regress binary
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/mg
+          key: mg-regress-v1
+
+      - name: Bundle (esbuild 单文件 CJS)
+        run: npm run build:bundle
+
+      - name: E2E (spawn dist/index.cjs, JSON-RPC stdio 全链路)
+        run: npm run test:e2e

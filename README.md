@@ -103,6 +103,12 @@ npx tsx src/index.ts --cookie "gfsessionid=..." --url https://mastergo.com
 - **本地加速**：已有快照时设 `MG_REGRESS_SRC` 指向它即可跳过下载；`MG_REGRESS_CACHE` 可把在线下载结果缓存一份供下次复用。
 - **比对方式**：**按结构/类型比对**，绝不 md5 / 整文件 diff——`/data` 响应不可字节复现（见上文）。
 
+## CI 与端到端验证（2026-09-21）
+
+- **GitHub Actions**（`.github/workflows/ci.yml`）：push/PR 触发，依次跑 `npm ci` → `tsc` → `test:diff` → `test:regress`（`actions/cache` 复用 47MB 二进制快照，key `mg-regress-v1`）→ `build:bundle` → `test:e2e`。
+- **`npm run test:diff`**（`scripts/verify-diff.ts`）：diff 纯函数自检，纯内存、不依赖网络/二进制。
+- **`npm run test:e2e`**（`scripts/e2e-mcp.ts`）：以真实 MCP 客户端身份 spawn `dist/index.cjs`，走 JSON-RPC stdio 全链路——initialize → `tools/list`（断言 10 个工具齐全）→ 依次调用 `get_file_meta` / `list_pages` / `get_page_tree` / `diff_files` / `get_file_nodes` / `list_styles`，基于 **Ant Design 5 官方公开文件**（antd5，modern 格式 74 页，无需 Cookie），首次全量下载 ~106MB、进程内缓存复用。本地实测全链路 PASS（list_pages 74 页、get_file_nodes 144055 节点）。
+
 ## 权限说明（重要）
 
 - **公开文件（`isPublic: true`）无需任何认证**：实测不带 Cookie、甚至带无效 Cookie，`GET /api/v1/documents/{fileId}` 与 `/data/{fileKey}` 均返回 `200` 与完整数据。因此客户端**不做 Cookie 前置校验**（前置拦截会让公开文件的 `list_pages` / `get_page_tree` 误失败）；

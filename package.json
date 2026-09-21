@@ -17,6 +17,7 @@
     "test:regress": "tsx scripts/regress.ts",
     "test:styles": "tsx scripts/verify-styles-truth.ts",
     "test:diff": "tsx scripts/verify-diff.ts",
+    "test:e2e": "tsx scripts/e2e-mcp.ts",
     "build": "tsc",
     "build:bundle": "node scripts/build.mjs",
     "prepare": "node scripts/build.mjs",
