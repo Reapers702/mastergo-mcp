@@ -130,9 +130,11 @@ async function main() {
 }
 
 /**
- * 样式解码守卫：火车票（legacy 编码）文件本地的颜色样式。
+ * 样式解码守卫：火车票（legacy 编码）的颜色/文字样式。
  *
- * 基线（README 既有记录）：4 个本地 paint 样式；该文件 0 个文字样式、0 个效果样式。
+ * 基线：本文件**自建** 4 个 paint 样式（浏览器 `getLocalPaintStyles()` 真值一致）、0 个文字样式；
+ * 另有 86 个 paint / 4 个文字样式来自其订阅的团队库（ukey 前缀是别人的 fileId），
+ * 2026-09 起这些库引用样式**也一并返回**（用 `isExternal`/`sourceFileId` 区分），故总数进基线。
  *
  * 这条守卫的意义：legacy 与 modern 是**两套 ukey 编码**，只测其中一个极易改坏另一个 ——
  * 历史上的 `list_styles` 漏检 bug 正是「在新编码上返回 0 条、在旧编码上看起来完全正常」。
@@ -143,17 +145,45 @@ const EXPECTED_STYLES: Array<{ id: string; name: string; kind: string }> = [
   { id: "5481:060533", name: "1", kind: "SOLID" },
   { id: "5481:060542", name: "2", kind: "SOLID" },
 ];
+/** 含库引用的总条数基线（改判据时必须一起看，防止「放宽变成乱放宽」） */
+const EXPECTED_PAINT_TOTAL = 90;
+const EXPECTED_TEXT_TOTAL = 4;
 
 function checkStyles(buf: Buffer): boolean {
   const fileId = "115278536821990";
-  const styles = listLocalPaintStyles(buf, fileId);
-  const texts = listLocalTextStyles(buf, fileId);
+  const allPaint = listLocalPaintStyles(buf, fileId);
+  const allText = listLocalTextStyles(buf, fileId);
+  const styles = allPaint.filter((s) => !s.isExternal);
+  const texts = allText.filter((s) => !s.isExternal);
 
   console.log(`[regress] 样式解码回归（legacy 编码）`);
-  console.log(`  paint 样式 = ${styles.length}（基线 ${EXPECTED_STYLES.length}）`);
-  console.log(`  文字样式   = ${texts.length}（基线 0）`);
+  console.log(
+    `  paint 样式 = ${styles.length} 本地 + ${allPaint.length - styles.length} 库引用` +
+      `（基线 ${EXPECTED_STYLES.length} 本地 / ${EXPECTED_PAINT_TOTAL} 总）`
+  );
+  console.log(
+    `  文字样式   = ${texts.length} 本地 + ${allText.length - texts.length} 库引用` +
+      `（基线 0 本地 / ${EXPECTED_TEXT_TOTAL} 总）`
+  );
 
-  let ok = styles.length === EXPECTED_STYLES.length && texts.length === 0;
+  let ok =
+    styles.length === EXPECTED_STYLES.length &&
+    texts.length === 0 &&
+    allPaint.length === EXPECTED_PAINT_TOTAL &&
+    allText.length === EXPECTED_TEXT_TOTAL;
+
+  // 来源标注必须自洽：sourceFileId 取自 ukey 前缀，isExternal 由它与 fileId 比较得出
+  for (const s of [...allPaint, ...allText]) {
+    if (s.sourceFileId !== s.ukey.split("+")[0]) {
+      console.log(`  ❌ ${s.id} sourceFileId=${s.sourceFileId} 与 ukey 前缀不一致 (${s.ukey})`);
+      ok = false;
+    }
+    if (s.isExternal !== (s.sourceFileId !== fileId)) {
+      console.log(`  ❌ ${s.id} isExternal=${s.isExternal} 与 sourceFileId=${s.sourceFileId} 矛盾`);
+      ok = false;
+    }
+  }
+
   for (const want of EXPECTED_STYLES) {
     const got = styles.find((s) => s.id === want.id);
     if (!got) {

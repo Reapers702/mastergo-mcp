@@ -1182,7 +1182,9 @@ export interface PaintStyle {
   collectionName: string;
   /** ukey（fileId+selfId） */
   ukey: string;
-  /** 是否来自外部文件（本文件扫描时按 ukey 前缀筛掉外部，恒为 false） */
+  /** 定义该样式的文件 id（本文件自建 = fileId；库引用/复制带入 = 源库 fileId） */
+  sourceFileId: string;
+  /** 是否由其他文件定义的样式 */
   isExternal: boolean;
   /** 样式包含的 paint 列表（SOLID 给 color，渐变等 color 为 null） */
   paints: NodePaint[];
@@ -1206,11 +1208,11 @@ export interface PaintStyle {
  * 锚点：`03 61 <subtype> 00 [04 00] 05 01 00 00 06 01 07 <ukey>`，精准区分 paint 样式
  * 聚合记录 vs 节点记录（节点 typeRaw 也叫 aX 但没有此后缀）。
  *
- * 本文件样式筛选用 ukey 前缀匹配 fileId+'+'：ukey 形如 "115278536821990+<selfId>" 是本文件
- * 定义，其他 ukey 前缀（如 "87978417736562+..."）是外部样式引用（来自团队库/组件库）。
+ * 返回该文件 `/data` 里出现的**全部** paint 样式（本文件自建 + 团队库/复制带入），
+ * 由 `sourceFileId` / `isExternal` 标注来源，不按 ukey 前缀丢弃记录（见 StyleIndexRecord 说明）。
  *
  * @param buf /data 二进制
- * @param fileId 数字 documentId（如 115278536821990），用于筛本文件 ukey 前缀
+ * @param fileId 数字 documentId（如 115278536821990），用于补全 ukey 前缀与判定来源
  */
 export function listLocalPaintStyles(buf: Buffer, fileId: string): PaintStyle[] {
   const paintMap = buildPaintTable(buf);
@@ -1218,7 +1220,7 @@ export function listLocalPaintStyles(buf: Buffer, fileId: string): PaintStyle[] 
   const styles: PaintStyle[] = [];
 
   for (const rec of scanStyleIndex(buf, fileId)) {
-    if (rec.kind !== "PAINT" || rec.isExternal) continue;
+    if (rec.kind !== "PAINT") continue;
     // 渐变优先：样式 id 对应渐变 paint 图元的 refId，直接带出 stops/type/handles。
     const grads = gradientMap.get(rec.id);
     const paints: NodePaint[] = grads && grads.length ? grads : (() => {
@@ -1238,7 +1240,8 @@ export function listLocalPaintStyles(buf: Buffer, fileId: string): PaintStyle[] 
       collectionId: "M:1",
       collectionName: "集合",
       ukey: rec.ukey,
-      isExternal: false,
+      sourceFileId: rec.sourceFileId,
+      isExternal: rec.isExternal,
       paints,
     });
   }
@@ -1268,8 +1271,11 @@ const STYLE_KIND_BY_N: Record<number, StyleKind> = { 1: "PAINT", 2: "EFFECT", 3:
  *   - 新编码（移动端界面设计，实测 57/57 命中）：ukey 只存 `+<selfId>`，**不含 fileId 前缀**
  *   - 旧编码（火车票）：ukey 存 `<fileId>+<selfId>`，且 `05` 块后多一个 `06 01`
  *
- * 本文件判定**不能**只靠 `ukey.startsWith(fileId + "+")`（旧实现的缺陷：新编码下必然 0 命中）。
- * 规则：ukey 形如 `+<id>`（无 fileId 前缀）视为本文件；形如 `<fid>+<id>` 则比较 fid。
+ * ukey 前缀**只用于标注来源，不作过滤**。曾经的「前缀不等于本文件 fileId 就丢弃」是错的：
+ * 从团队库**复制/另存**出来的文件，二进制里整批保留源库 ukey（实测 antd5 副本
+ * `204971164239455` 的 294 条样式记录 ukey 前缀全是源库 `122691166044911`），
+ * 而客户端把它们当本地样式（`getLocalPaintStyles()` 返回同名同 id、`remote:false`、
+ * ukey 前缀被重写成本文件）。按前缀过滤会让这类文件**一条样式都读不到**。
  */
 export interface StyleIndexRecord {
   /** 样式 id（selfId） */
@@ -1278,9 +1284,11 @@ export interface StyleIndexRecord {
   name: string;
   /** 由 `05 <n>` 判出的种类 */
   kind: StyleKind;
-  /** ukey：新编码 `+<id>`，旧编码 `<fileId>+<id>` */
+  /** ukey：新编码 `+<id>`，旧编码 `<fileId>+<id>`（输出时已补全为 `<fileId>+<id>`） */
   ukey: string;
-  /** 是否来自其他文件（团队库/外部引用） */
+  /** 定义该样式的文件 id：本文件自建为 fileId，库引用/复制带入为源库 fileId */
+  sourceFileId: string;
+  /** 是否由其他文件定义（团队库或复制带入），sourceFileId != fileId */
   isExternal: boolean;
   /** 描述文本 */
   description: string;
@@ -1359,7 +1367,8 @@ function scanStyleIndex(buf: Buffer, fileId: string): StyleIndexRecord[] {
       // 二进制里新编码只存 `+<id>`，而浏览器 API 的 ukey 恒为 `<fileId>+<id>`；
       // 输出时补全前缀，保证与真值一致（旧编码本就带前缀，原样返回）。
       ukey: m[1] === "" ? fileId + uk.s : uk.s,
-      // 新编码（m[1] 为空）即本文件；旧编码则比较 fileId 前缀
+      // 前缀为空（新编码）即本文件定义；否则前缀就是定义该样式的文件 id
+      sourceFileId: m[1] === "" ? fileId : m[1],
       isExternal: m[1] !== "" && m[1] !== fileId,
       description: descText,
       bodyPos: p05 + 2,
@@ -1383,6 +1392,8 @@ export interface TextStyle {
   name: string;
   type: "TEXT";
   ukey: string;
+  /** 定义该样式的文件 id（本文件自建 = fileId；库引用/复制带入 = 源库 fileId） */
+  sourceFileId: string;
   isExternal: boolean;
   collectionId: string;
   collectionName: string;
@@ -1481,6 +1492,7 @@ function parseTextStyleBody(buf: Buffer, rec: StyleIndexRecord): TextStyle | nul
     name: rec.name,
     type: "TEXT",
     ukey: rec.ukey,
+    sourceFileId: rec.sourceFileId,
     isExternal: rec.isExternal,
     collectionId: "M:1",
     collectionName: "集合",
@@ -1496,7 +1508,7 @@ function parseTextStyleBody(buf: Buffer, rec: StyleIndexRecord): TextStyle | nul
 }
 
 /**
- * 扫描二进制中所有**本文件定义**的文字样式。
+ * 扫描该文件 `/data` 里出现的**全部**文字样式（含团队库/复制带入，按 sourceFileId 标注来源）。
  *
  * 实测（2026-09 移动端界面设计）：13/13 与浏览器 `getLocalTextStyles()` 真值的
  * id / name / fontSize / lineHeight 完全一致。
@@ -1504,7 +1516,7 @@ function parseTextStyleBody(buf: Buffer, rec: StyleIndexRecord): TextStyle | nul
 export function listLocalTextStyles(buf: Buffer, fileId: string): TextStyle[] {
   const out: TextStyle[] = [];
   for (const rec of scanStyleIndex(buf, fileId)) {
-    if (rec.kind !== "TEXT" || rec.isExternal) continue;
+    if (rec.kind !== "TEXT") continue;
     const st = parseTextStyleBody(buf, rec);
     if (st) out.push(st);
   }
@@ -1550,6 +1562,8 @@ export interface EffectStyle {
   name: string;
   type: "EFFECT";
   ukey: string;
+  /** 定义该样式的文件 id（本文件自建 = fileId；库引用/复制带入 = 源库 fileId） */
+  sourceFileId: string;
   isExternal: boolean;
   collectionId: string;
   collectionName: string;
@@ -1686,7 +1700,7 @@ function readEffectTypeName(t: number): string {
 }
 
 /**
- * 扫描二进制中所有**本文件定义**的效果样式。
+ * 扫描该文件 `/data` 里出现的**全部**效果样式（含团队库/复制带入，按 sourceFileId 标注来源）。
  *
  * 实测（2026-09 移动端界面设计）：6/6 条 id/name/ukey 与浏览器 `getLocalEffectStyles()`
  * 真值一致；`color`（含 alpha）8/8 一致，`radius` 与 `offsetY` 在有该字段时全部一致。
@@ -1695,12 +1709,13 @@ export function listLocalEffectStyles(buf: Buffer, fileId: string): EffectStyle[
   const table = scanEffectTable(buf);
   const out: EffectStyle[] = [];
   for (const rec of scanStyleIndex(buf, fileId)) {
-    if (rec.kind !== "EFFECT" || rec.isExternal) continue;
+    if (rec.kind !== "EFFECT") continue;
     out.push({
       id: rec.id,
       name: rec.name,
       type: "EFFECT",
       ukey: rec.ukey,
+      sourceFileId: rec.sourceFileId,
       isExternal: rec.isExternal,
       collectionId: "M:1",
       collectionName: "集合",
@@ -1732,6 +1747,8 @@ export interface VariableEntry {
   collectionId: string;
   collectionName: string;
   ukey: string;
+  /** 定义该变量的文件 id（本文件自建 = fileId；库引用/复制带入 = 源库 fileId） */
+  sourceFileId: string;
   isExternal: boolean;
   description: string;
   /** PAINT 变量的颜色（走 paint 定义表）；EFFECT / TEXT 为 null */
@@ -1739,7 +1756,7 @@ export interface VariableEntry {
 }
 
 /**
- * 扫描二进制中所有**本文件定义**的变量（= 样式统一视图）。
+ * 扫描该文件 `/data` 里出现的**全部**变量（= 样式统一视图；含团队库/复制带入，按 sourceFileId 标注来源）。
  *
  * 实测（2026-09 移动端界面设计）：57/57 条 id/name/type 与浏览器
  * `variables.getVariables()` 真值一致；PAINT 变量颜色与 `getLocalPaintStyles()` 一致。
@@ -1752,7 +1769,6 @@ export function listLocalVariables(buf: Buffer, fileId: string): VariableEntry[]
   const out: VariableEntry[] = [];
 
   for (const rec of scanStyleIndex(buf, fileId)) {
-    if (rec.isExternal) continue;
     let color: NodeColor | null = null;
     if (rec.kind === "PAINT") {
       const entry = paintMap.get(rec.id);
@@ -1765,6 +1781,7 @@ export function listLocalVariables(buf: Buffer, fileId: string): VariableEntry[]
       collectionId: "M:1",
       collectionName: "集合",
       ukey: rec.ukey,
+      sourceFileId: rec.sourceFileId,
       isExternal: rec.isExternal,
       description: rec.description,
       color,

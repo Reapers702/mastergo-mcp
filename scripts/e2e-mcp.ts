@@ -158,9 +158,15 @@ async function main(): Promise<void> {
   const nodes = callResult(await c.send("tools/call", { name: "get_file_nodes", arguments: { file: FILE_ID, limit: 5 } }));
   check(typeof nodes.totalNodes === "number" && nodes.totalNodes > 0, `get_file_nodes totalNodes=${nodes.totalNodes}`);
 
-  // 8. list_styles（antd5 现代编码样式表）
+  // 8. list_styles（antd5 现代编码样式表：全部是团队库 ukey，2026-09 起按来源标注而非吞掉）
   const styles = callResult(await c.send("tools/call", { name: "list_styles", arguments: { file: FILE_ID } }));
   check(Array.isArray(styles.styles), `list_styles 返回 ${styles.styles?.length} 条`);
+  check(styles.styles?.length > 100, `list_styles 条数 ${styles.styles?.length} 应 > 100（库引用样式不再被过滤）`);
+  check(
+    styles.styles?.every((s: any) => typeof s.sourceFileId === "string" && s.sourceFileId.length > 0),
+    "每条样式都带 sourceFileId 来源标注"
+  );
+  check(styles.styles?.some((s: any) => s.name && !/^[0-9]+:[0-9A-Za-z]+$/.test(s.name)), "样式名可正常读出（非 id）");
 
   c.kill();
   console.log(failed === 0 ? "\nPASS: e2e 全链路验证通过" : `\nFAIL: ${failed} 项失败`);

@@ -78,10 +78,10 @@ node dist/index.cjs --cookie "gfsessionid=..." --url https://mastergo.com
 | `list_pages` | 文件内全部页面列表（页面 ID + 页面名） | `/data/{fileKey}` 二进制索引 |
 | `get_file_nodes` | 全量节点索引：全部页面 + 所有名节点的 id/名称（支持按名搜索、限量） | `/data/{fileKey}` 二进制索引（全量下载） |
 | `get_page_tree` | 指定页面节点树：id、名称、类型、父节点 id、父子层级（支持限深展开）。`page` 可省略，自动取 URL 的 `page_id` | `/data/{fileKey}` 二进制节点树解码 |
-| `list_styles` | 文件本地颜色样式（PAINT）：id、名称、collection、ukey、RGBA（渐变含 **type/stops/手柄**） | `/data/{fileKey}` 二进制样式索引表 + paint 定义表 + 渐变 paint 图元 |
-| `list_text_styles` | 文件本地文字样式（TEXT）：id、名称、字体名、字号、行高、字体 hash | `/data/{fileKey}` 二进制样式索引表（`05 03` 子块） |
-| `list_effect_styles` | 文件本地效果样式（EFFECT）：id、名称、颜色（含 alpha）、模糊半径、X/Y 偏移、类型、spread | `/data/{fileKey}` 二进制样式索引表 + 效果定义表 |
-| `list_variables` | 文件本地变量（Design Tokens）：id、名称、type、collection、ukey、颜色 | `/data/{fileKey}` 二进制样式索引表（**实测与「样式」是同一批对象**） |
+| `list_styles` | 文件内颜色样式（PAINT）：id、名称、collection、ukey、**来源文件 `sourceFileId`/`isExternal`**、RGBA（渐变含 **type/stops/手柄**） | `/data/{fileKey}` 二进制样式索引表 + paint 定义表 + 渐变 paint 图元 |
+| `list_text_styles` | 文件内文字样式（TEXT）：id、名称、字体名、字号、行高、字体 hash | `/data/{fileKey}` 二进制样式索引表（`05 03` 子块） |
+| `list_effect_styles` | 文件内效果样式（EFFECT）：id、名称、颜色（含 alpha）、模糊半径、X/Y 偏移、类型、spread | `/data/{fileKey}` 二进制样式索引表 + 效果定义表 |
+| `list_variables` | 文件内变量（Design Tokens）：id、名称、type、collection、ukey、颜色 | `/data/{fileKey}` 二进制样式索引表（**实测与「样式」是同一批对象**） |
 | `list_components` | 文件本地组件（COMPONENT，含组件集）：id、名称、ukey、isExternal、宽高 | `/data/{fileKey}` 二进制节点扫描（本质是带自引用 ukey 的容器节点） |
 | `diff_files` | 两份文件/页面的节点树差异：新增/删除/修改，修改带字段级明细 | 基于 `get_page_tree` 输出做纯内存 diff |
 
@@ -103,6 +103,24 @@ node dist/index.cjs --cookie "gfsessionid=..." --url https://mastergo.com
 > **`/data` 接口的两个实测特性（做回归时务必注意）**：
 > 1. **忽略 `Range`**：带 `Range: bytes=0-8388607` 仍返回 `HTTP 200` + 完整 `content-length`（无 `content-range` / `accept-ranges`），所以 `list_pages` 实际也会下载整个文件。客户端据此在「未请求分段」或「请求了分段但返回 200（而非 206）」时按**全量缓存**，避免随后的 `get_page_tree` 重复下载同一个数十 MB 文件（实测省下约 2s 下载）。
 > 2. **响应不可字节复现**：同一未变动文件（`updateAt` 三次查询一致）连续下载会得到**不同 md5**，长度相同但可有数千万字节差异（疑似记录序列化顺序随机）。因此**回归对比必须按结构（节点 id / 类型 / 层级），不要用 md5 或整文件 diff**。已验证解析器对此稳健：两份字节差异达 4353 万字节的新下载，均解析出同样的 **828/829** 类型结果、且逐节点类型完全一致（919 相同 / 0 不同）。
+
+## 样式来源判定（`list_styles` 系列，2026-09-22 改）
+
+样式索引记录里的 `07 <ukey>` 前缀是**定义该样式的文件 id**，历史上被当作「是否本文件」的过滤器，
+结果是**从团队库复制/另存出来的文件一条样式都读不到**（实测 antd5 副本 `204971164239455`：
+浏览器 `getLocalPaintStyles()` 真值 290 条 `remote:false`，而旧判据返回 0 条——它的记录 ukey 前缀全是源库 `122691166044911`）。
+现在**不再按前缀丢弃记录**，全部返回并用两个字段标注来源：
+
+- `sourceFileId`：ukey 前缀（新编码无前缀时 = 本文件 fileId）
+- `isExternal`：`sourceFileId !== fileId`
+
+> ⚠️ 已知局限：`isExternal` 只反映「谁定义了这条样式」，**不等于**客户端 UI 上的本地/远程。
+> 真正的订阅关系在 `GET /api/v1/users/team-libraries/styles?documentId=...`（实测该接口**匿名 401**、
+> 对部分公开文件还会 403），无法离线获取，故复制稿的样式会被标成 `isExternal=true`。
+> 需要「只要本文件自建」时按 `sourceFileId === fileId` 过滤即可。
+>
+> 实测总数（含库引用）：antd5 官方文件 `205140012617682` → paint 290 / effect 43；
+> 火车票（legacy）→ paint 4 本地 + 86 库引用、文字 0 本地 + 4 库引用（`test:regress` 已把两个数都写进基线）。
 
 ## 回归测试（node-tree 类型解码守卫）
 
