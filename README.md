@@ -7,6 +7,7 @@
 ## 特性
 
 - **单 Cookie 认证**：浏览器 Cookie（`gfsessionid=...`）即可访问文件元信息 / 页面列表 / 全量节点索引，无需个人访问令牌、无需付费席位
+- **单文件产物**：esbuild 打成自包含 `dist/index.cjs`（含 shebang，`bin` 名为 `mastergo-mcp`），运行时无需 node_modules / tsx
 - **私有二进制逆向**：解析 `/data/{fileKey}` 的 MasterGo 私有二进制格式，提取文件内全部页面列表（双 marker 逆向）与全量节点索引（页面/节点位标记区分 + 去重）
 - **5 分钟 LRU 缓存 + in-flight 去重**：相同请求并发复用，避免重复网络开销
 - **URL 智能解析**：直接粘贴设计稿 URL（含 `?page_id=` / `?layer_id=`）即可使用
@@ -16,8 +17,11 @@
 
 ```bash
 npm install
-npm run build
 ```
+
+`npm install` 会触发 `prepare` 钩子（`scripts/build.mjs`）用 esbuild 打出**单文件自包含产物** `dist/index.cjs`：
+运行时依赖（axios / zod / MCP SDK）全部打进去，**产物运行时无需 node_modules、无需 tsx**。
+手动重建：`npm run build:bundle`（`npm run build` 仅做 tsc 类型检查与类型产物）。
 
 ### 认证（唯一方式：浏览器 Cookie）
 
@@ -37,11 +41,15 @@ Cookie 获取：登录 mastergo.com 后，打开浏览器开发者工具 → Net
 ### 启动
 
 ```bash
-# 方式一：环境变量 / .env
-MG_COOKIE="gfsessionid=..." npx tsx src/index.ts
+# 推荐：单文件产物（可执行文件名 mastergo-mcp）
+MG_COOKIE="gfsessionid=..." node dist/index.cjs
+MG_COOKIE="gfsessionid=..." npm start
 
-# 方式二：命令行参数
-npx tsx src/index.ts --cookie "gfsessionid=..." --url https://mastergo.com
+# 开发：直接跑 TS 源码（需 devDependencies）
+MG_COOKIE="gfsessionid=..." npm run dev
+
+# 命令行参数（优先级高于环境变量）
+node dist/index.cjs --cookie "gfsessionid=..." --url https://mastergo.com
 ```
 
 ### 配置到 AI 客户端
@@ -52,13 +60,15 @@ npx tsx src/index.ts --cookie "gfsessionid=..." --url https://mastergo.com
 {
   "mcpServers": {
     "mastergo": {
-      "command": "npx",
-      "args": ["tsx", "/绝对路径/mastergo-mcp/src/index.ts"],
+      "command": "node",
+      "args": ["/绝对路径/mastergo-mcp/dist/index.cjs"],
       "env": { "MG_COOKIE": "gfsessionid=xxx; ..." }
     }
   }
 }
 ```
+
+> 本地开发想边改代码边调试时，把 `command`/`args` 换成 `npx` + `["tsx", "/绝对路径/mastergo-mcp/src/index.ts"]` 即可，无需重新打包；日常使用与接入请用上文的 `dist/index.cjs`。
 
 ## 已实现工具
 
@@ -96,6 +106,15 @@ npx tsx src/index.ts --cookie "gfsessionid=..." --url https://mastergo.com
 
 ## 回归测试（node-tree 类型解码守卫）
 
+**脚本分层**（按是否需要网络/本地快照排序）：
+
+| 命令 | 覆盖 | 前置 |
+| --- | --- | --- |
+| `npm test` → `test:diff` | diff 纯函数自检 | 无（纯内存，任何时候可跑） |
+| `npm run test:regress` | legacy 节点树类型 + 样式基线 | 匿名下载 47MB 公开文件（或 `MG_REGRESS_SRC` 指快照） |
+| `npm run test:styles` | modern 颜色/文字/效果/变量真值 | `.cache/mg_mobile_kit.bin`（私有快照，**不入库**；缺失时脚本提示并跳过） |
+| `npm run test:e2e` | MCP stdio 全链路 | 先 `npm run build:bundle` |
+
 `npm run test:regress` → 逐 PAGE 根 `parsePageTree`，断言节点类型解码不退化。
 配套真值已入库 `test/fixtures/train_ticket_truth.json`（火车票公开文件，829 条，字段名 `type`）。当前基线 **828/828 命中、0 错判**。
 
@@ -131,6 +150,11 @@ src/
   node-tree.ts    # 私有二进制节点树解码（01/02/03/04 记录 + 1c 子块类型判别）
   diff.ts         # 节点树差异对比（纯函数：id/path 匹配 + 字段级 diff，供 diff_files 使用）
   tools.ts        # MCP 工具定义与参数
+scripts/
+  build.mjs       # esbuild 打包：src/index.ts → dist/index.cjs（单文件自包含，`prepare` 钩子调用）
+  regress.ts / verify-styles-truth.ts / verify-diff.ts / e2e-mcp.ts  # 各级守卫，见「回归测试」
+dist/
+  index.cjs       # 运行产物（含 shebang，可作 bin：mastergo-mcp）
 ```
 
 ## 待实现能力（Roadmap · 均基于网页接口自研）

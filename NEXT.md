@@ -138,11 +138,19 @@
   需 `.cache/mg_mobile_kit.bin`（私有文件快照，6.2MB，不入库；缺失时脚本提示并跳过），或用 `MG_STYLE_SRC=<路径>` 指定。
 - **为什么两套都要**：legacy 与 modern 是**两套 ukey 编码**，只测一个极易改坏另一个 ——
   `list_styles` 漏检 bug 正是「modern 返回 0 条、legacy 看起来完全正常」。
+- ⚠️ **2026-09-21 复核发现：modern 守卫实际处于「静默跳过」状态** —— `test:styles` 依赖
+  `.cache/mg_mobile_kit.bin`（私有快照、不入库），本机当前**没有**该文件，脚本走
+  `verify-styles-truth.ts:51` 的「⏭ 跳过并 `exit 0`」；CI 也没挂这条。也就是说 modern 侧的
+  颜色/文字/效果/变量断言**目前无法复跑**，正是上面那句话点出的风险敞口。修法见下文 11。
 
 ### 8. 打包发布 —— ✅ 已完成（2026-09-20）
 - `package.json` 已补 `bin`（`mastergo-mcp` → `dist/index.cjs`）/ `files`，用 esbuild（`scripts/build.mjs`）出单文件 CJS，
   免 `npx tsx`、免 node_modules。
 - `npm run build`（tsc）+ `npm run build:bundle`（`node scripts/build.mjs`）→ `dist/index.cjs`，spawn 校验可启动到 MCP server 就绪。
+- **文档对齐（2026-09-21）**：README「快速开始 / 启动 / 配置到 AI 客户端」已改为推荐
+  `node dist/index.cjs`（`npm install` 的 `prepare` 钩子自动打包），`npx tsx src/index.ts` 降级为「开发调试」路径；
+  特性表补了单文件产物一条。已实测 spawn `dist/index.cjs` → initialize → tools/list 返回 10 个工具。
+- **`npm test` 已接上**（原为 `exit 1` 占位）：指向纯内存的 `test:diff`；需要网络/快照的守卫仍用各自脚本名。
 
 ### 9. 设计稿差异对比 —— ✅ 已完成（2026-09-21）
 - `diff_files` 已交付：基于 `get_page_tree` 输出做两份快照的节点 diff（**纯内存，不依赖真值**），输出 added/removed/changed，changed 带字段级明细。
@@ -175,6 +183,22 @@
   antd5 仅作为 **e2e 的 modern 样本**，不替代 regress。
 - 本地实测（2026-09-21）：全链路 PASS（tools 10/10、list_pages 74 页、get_page_tree 400 节点、
   get_file_nodes 144055 节点、diff_files 汇总正确）；`test:regress` 火车票 legacy 守卫 PASS。
+
+### 11. modern 样式守卫可复跑化 —— ⬜ 待做（2026-09-21 列为下一步，建议优先）
+- **要解决的问题**：见上文 7 的 ⚠️ —— modern 编码的样式/文字/效果/变量解码现在**没有可复跑的自动化保护**
+  （`test:styles` 因缺私有快照静默跳过，CI 未挂）。改 `list_styles`/`parseTextStyleBody`/效果解码时
+  只能靠手工比对，历史 bug 就是这么漏过去的。
+- **建议做法**（照 `test:regress` 的既有模式抄即可）：
+  1. 找一个**公开（`isPublic`）且带本地样式**的 modern 文件。⚠️ antd5 **不行** —— 它 445 个样式 ukey
+     全部来自外部团队库，本地样式 0 条（见上文 10 末尾），正好会被守卫误判成「解码坏了」。
+  2. 用已打通的 `window.mg` 真值导出链路（见「2026-09-20 的关键突破」第 0 节）导一次
+     `getLocalPaintStyles/TextStyles/EffectStyles` + `variables`，存成 `test/fixtures/truth_<name>.json` **入库**；
+  3. `test:styles` 改成：优先读 `MG_STYLE_SRC`/本地快照，缺失时**匿名下载** `/data/{fileKey}`，
+     并支持 `MG_STYLE_CACHE` 落盘供 CI `actions/cache` 复用；真值缺失时报错而非 `exit 0`。
+  4. CI 挂上（新增一个 cache key，别复用 `mg-regress-v1`）。
+- **工作量**：主要在「找到合适的公开 modern 文件 + 导一次真值」，代码改动本身不大。
+- **另一个可选替代**：把 `.cache/mg_mobile_kit.bin` 的快照以某种可分发形式留存（私有文件，需 Cookie，
+  故不适合进公开 CI）—— 因此优先选上面「换公开样本」的路线。
 
 ---
 
