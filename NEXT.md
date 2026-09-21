@@ -1,10 +1,10 @@
 # 下一步可做的事（交接清单）
 
-> 更新于 2026-09-20。字段级逆向细节见 README，本文只列**优先级、入口、阻塞与工作量**。
+> 更新于 2026-09-21。字段级逆向细节见 README，本文只列**优先级、入口、阻塞与工作量**。
 
 ## 现状一句话
 
-**9 个工具**可用：`get_file_meta` / `list_pages` / `get_file_nodes` / `get_page_tree` / `list_styles` / `list_text_styles` / `list_effect_styles` / `list_variables` / `list_components`。
+**10 个工具**可用：`get_file_meta` / `list_pages` / `get_file_nodes` / `get_page_tree` / `list_styles` / `list_text_styles` / `list_effect_styles` / `list_variables` / `list_components` / `diff_files`。
 
 - 节点树：legacy 828/828（0 错判）、modern 命中 8.3%（容器仍返回 `null`）
 - **样式与变量：已全面打通**，与浏览器真值逐条一致 —— 颜色 38/38、文字 13/13、效果 **34/34（antd5，90/90 项含全字段）**、变量 57/57
@@ -144,8 +144,11 @@
   免 `npx tsx`、免 node_modules。
 - `npm run build`（tsc）+ `npm run build:bundle`（`node scripts/build.mjs`）→ `dist/index.cjs`，spawn 校验可启动到 MCP server 就绪。
 
-### 9. 设计稿差异对比（切图导出已暂缓）
-- diff：基于现有 `get_page_tree` 输出做两份快照的节点 diff，不阻塞。
+### 9. 设计稿差异对比 —— ✅ 已完成（2026-09-21）
+- `diff_files` 已交付：基于 `get_page_tree` 输出做两份快照的节点 diff（**纯内存，不依赖真值**），输出 added/removed/changed，changed 带字段级明细。
+- `match_by`：`id`（默认，同文件不同版本，id 稳定）/ `path`（跨文件，按根→节点名称路径匹配，重名兄弟按出现次序加 `#n` 消歧；节点改名表现为 removed+added）。
+- 可选 `ignore`（`name`/`type`/`geometry` 或 geometry 子字段，数字按 1e-6 容差）与 `max_changes`（默认 200，0 不限）。
+- `npm run test:diff`（`scripts/verify-diff.ts`）为纯内存自检，不依赖网络/二进制。
 - 切图 / 图片导出：**⚠️ 暂不考虑**（`window.mg` 里未见导出函数，逆向难度高）——**明确不主动做**，待开发者后期指明要求后再启动。
 
 ---

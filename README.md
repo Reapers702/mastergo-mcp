@@ -72,6 +72,8 @@ npx tsx src/index.ts --cookie "gfsessionid=..." --url https://mastergo.com
 | `list_text_styles` | 文件本地文字样式（TEXT）：id、名称、字体名、字号、行高、字体 hash | `/data/{fileKey}` 二进制样式索引表（`05 03` 子块） |
 | `list_effect_styles` | 文件本地效果样式（EFFECT）：id、名称、颜色（含 alpha）、模糊半径、X/Y 偏移、类型、spread | `/data/{fileKey}` 二进制样式索引表 + 效果定义表 |
 | `list_variables` | 文件本地变量（Design Tokens）：id、名称、type、collection、ukey、颜色 | `/data/{fileKey}` 二进制样式索引表（**实测与「样式」是同一批对象**） |
+| `list_components` | 文件本地组件（COMPONENT，含组件集）：id、名称、ukey、isExternal、宽高 | `/data/{fileKey}` 二进制节点扫描（本质是带自引用 ukey 的容器节点） |
+| `diff_files` | 两份文件/页面的节点树差异：新增/删除/修改，修改带字段级明细 | 基于 `get_page_tree` 输出做纯内存 diff |
 
 ### 推荐工作流
 
@@ -121,6 +123,7 @@ src/
   page-index.ts   # 私有二进制页面索引解析（双 marker 逆向）
   node-index.ts   # 私有二进制全量节点索引解析（页面/节点位标记区分 + 去重）
   node-tree.ts    # 私有二进制节点树解码（01/02/03/04 记录 + 1c 子块类型判别）
+  diff.ts         # 节点树差异对比（纯函数：id/path 匹配 + 字段级 diff，供 diff_files 使用）
   tools.ts        # MCP 工具定义与参数
 ```
 
@@ -171,9 +174,9 @@ src/
   - **`M:1` / `M:2` 是真实 id**（纠正旧说法）：真值 `getCollections()` 返回 `[{id:"M:1", name:"集合", isExternal:false, modes:[{id:"M:2", name:"模式 1"}]}]`，并非客户端凭空构造的 pseudo-id；变量组 id 形如 `M:1_Neutrals`、`M:1_外部/Carbon Neutral`。
   - 未输出：`scopes`（二进制内未定位到该字段）、`codeSyntax`、多模式值（本文件仅 1 个模式 `M:2`）。
 - [ ] **图片/切图导出**：节点导出为 PNG/SVG/PDF，可交付到本地目录。**⚠️ 暂不考虑**（`window.mg` 未见导出函数，功能缺口虽大但逆向难度高）——待开发者后期指明要求再做，见 NEXT.md。
-- [ ] **设计稿差异对比**：两份文件/版本间节点 diff
+- [x] **设计稿差异对比**：`diff_files` 已交付（2026-09-21）。基于 `get_page_tree` 输出做两份快照的节点 diff（纯内存，不依赖真值）。匹配策略 `match_by`：`id`（默认，同文件不同版本，id 稳定）或 `path`（跨文件，按「根→节点的名称路径」匹配，重名兄弟按出现次序加 `#n` 消歧；节点改名表现为 removed+added）。输出 added/removed/changed 三类变更，changed 带字段级明细（如 `geometry.x`、`name`、`type`，数字按 1e-6 容差）；`ignore` 可跳过 `name`/`type`/`geometry` 或 geometry 子字段；`max_changes` 控制返回条数。`npm run test:diff` 为纯内存自检（不依赖网络/二进制）。
 - [x] **Cookie 过期检测 / 错误归一化**：`MasterGoError` + `toMasterGoError` 覆盖全部请求路径（含 `/data` 的 `arraybuffer` 错误体解码）。实测 `403 AccessDenied`（Cookie 失效 / 无权限）、`403 NotAllowAnonymousAccess`（文件未公开）、`NoDocumentPermission`、`NotFoundDocument`、`10003` 均给出可操作的中文提示；此前 `/data` 绕过归一化，失效时抛出**空消息**的原始 axios 错误，现已修复。
-- [ ] **打包发布**：`npm pack` / 单文件二进制（esbuild），免 npx tsx 依赖
+- [x] **打包发布**：`npm pack` / 单文件二进制（esbuild），免 npx tsx 依赖（已完成 2026-09-20：`package.json` 补 `bin`/`files`，`npm run build:bundle` 出 `dist/index.cjs`）
 
 ## 未解析内容 · 接手指南
 

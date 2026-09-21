@@ -2,7 +2,7 @@
  * MCP 工具实现（基于 MasterGo **网页接口**自研，不依赖官方 MCP 网关 /mcp/*）。
  *
  * 认证：浏览器 Cookie（MG_COOKIE）即可；无需付费席位 / 个人访问令牌。
- * 当前已实现（9 个）：
+ * 当前已实现（10 个）：
  *   - get_file_meta：文件元信息（/api/v1/documents/{id}）
  *   - list_pages：页面列表（解析 /data/{fileKey} 私有二进制索引）
  *   - get_file_nodes：全量节点索引（页面 + 全部名节点的 id/名称，可搜索过滤）
@@ -12,6 +12,7 @@
  *   - list_effect_styles：文件本地效果样式（EFFECT，阴影/模糊）
  *   - list_variables：文件本地变量（Design Tokens；实测与「样式」是同一批对象）
  *   - list_components：文件本地组件（COMPONENT/COMPONENT_SET，无独立编码表，本质是带自引用 ukey 的容器节点）
+ *   - diff_files：两份文件/页面的节点树差异对比（新增/删除/修改，修改带字段级明细）
  * 仍待加入：图片/切图导出（**暂不考虑**，待开发者后期指明再做，见 NEXT.md）。
  *
  * 样式与变量共用一张「样式索引表」，其类型判别式是记录内的 `05 <n>`：
@@ -21,6 +22,7 @@
 import { z } from "zod";
 import type { MasterGoClient } from "./mastergo.js";
 import { MasterGoError, extractIdsFromUrl } from "./mastergo.js";
+import { diffTrees } from "./diff.js";
 
 export interface ToolDef {
   name: string;
@@ -376,6 +378,100 @@ export function buildTools(): ToolDef[] {
           fileKey,
           totalComponents: components.length,
           components,
+        });
+      },
+    },
+
+    {
+      name: "diff_files",
+      description:
+        "对比两份 MasterGo 设计稿（或同一设计稿的两个版本/两个页面）的节点树差异。" +
+        "基于 get_page_tree 的节点输出（id/名称/类型/几何属性）做结构化 diff，" +
+        "输出新增（added）/删除（removed）/修改（changed）三类变更，修改带字段级明细" +
+        "（如 geometry.x、name、type）。" +
+        "匹配策略 match_by：'id'（默认）按节点 id 匹配，适合同一文件不同版本（id 稳定）；" +
+        "'path' 按从页面根到节点的名称路径匹配（重名兄弟按出现次序加 #n 消歧），" +
+        "适合跨文件对比（不同文件 id 完全不同，但图层结构同名同构）——注意节点改名会表现为 removed+added。" +
+        "ignore 可跳过比较字段：'name'、'type'、'geometry'，或 geometry 子字段（如 'geometry.x'、" +
+        "'geometry.fills'）；数字字段按 1e-6 容差比较。" +
+        "max_changes 限制返回的变更条数（默认 200，0 表示不限制）。" +
+        "参数 file_a/page_a 与 file_b/page_b 分别传两份文件（ID 或完整 URL）与目标页面" +
+        "（page_a/page_b 可省略，省略时自动采用各自 URL 中的 page_id/layer_id）。",
+      params: {
+        file_a: z.string().describe("文件 A 的 MasterGo 文件 ID 或完整文件 URL（必填）"),
+        page_a: z
+          .string()
+          .optional()
+          .describe("文件 A 的目标页面节点 id（可省略，省略时自动采用 file_a URL 中的 page_id/layer_id）"),
+        file_b: z.string().describe("文件 B 的 MasterGo 文件 ID 或完整文件 URL（必填）"),
+        page_b: z
+          .string()
+          .optional()
+          .describe("文件 B 的目标页面节点 id（可省略，省略时自动采用 file_b URL 中的 page_id/layer_id）"),
+        match_by: z
+          .enum(["id", "path"])
+          .optional()
+          .describe("匹配策略：'id'（默认，同文件不同版本）或 'path'（跨文件按名称路径匹配）"),
+        ignore: z
+          .array(z.string())
+          .optional()
+          .describe("忽略比较的字段：'name'、'type'、'geometry'，或 geometry 子字段（如 'geometry.x'）"),
+        max_changes: z
+          .number()
+          .int()
+          .min(0)
+          .max(5000)
+          .optional()
+          .describe("最多返回的变更条数（默认 200；0 表示不限制）"),
+      },
+      run: async (client, args) => {
+        const a = normalize(String(args.file_a));
+        const b = normalize(String(args.file_b));
+        const pageIdA = String(args.page_a || a.layerId || "");
+        const pageIdB = String(args.page_b || b.layerId || "");
+        if (!pageIdA) {
+          throw new MasterGoError("缺少 page_a：请用 list_pages 拿到目标页面 id，或从 file_a URL 的 page_id 传入");
+        }
+        if (!pageIdB) {
+          throw new MasterGoError("缺少 page_b：请用 list_pages 拿到目标页面 id，或从 file_b URL 的 page_id 传入");
+        }
+
+        const [metaA, metaB] = await Promise.all([
+          client.getFileMeta(a.fileId),
+          client.getFileMeta(b.fileId),
+        ]);
+        const fileKeyA: string | undefined = metaA.data?.fileKey;
+        const fileKeyB: string | undefined = metaB.data?.fileKey;
+        if (!fileKeyA) throw new MasterGoError("无法获取 file_a 的 fileKey，请检查文件 ID 与访问权限");
+        if (!fileKeyB) throw new MasterGoError("无法获取 file_b 的 fileKey，请检查文件 ID 与访问权限");
+
+        const [treeA, treeB] = await Promise.all([
+          client.getPageTree(fileKeyA, pageIdA),
+          client.getPageTree(fileKeyB, pageIdB),
+        ]);
+
+        const matchBy = args.match_by === "path" ? "path" : "id";
+        const result = diffTrees(treeA.nodes, treeB.nodes, {
+          matchBy,
+          ignore: Array.isArray(args.ignore) ? args.ignore.map(String) : undefined,
+          maxChanges: typeof args.max_changes === "number" ? args.max_changes : 200,
+        });
+
+        return jsonOut({
+          source: "web-data-tree-diff",
+          fileA: {
+            fileId: a.fileId,
+            fileKey: fileKeyA,
+            name: metaA.data?.name ?? null,
+            pageId: pageIdA,
+          },
+          fileB: {
+            fileId: b.fileId,
+            fileKey: fileKeyB,
+            name: metaB.data?.name ?? null,
+            pageId: pageIdB,
+          },
+          ...result,
         });
       },
     },
