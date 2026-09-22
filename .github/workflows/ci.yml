@@ -25,23 +25,30 @@ jobs:
       - name: Unit self-check (diff, 纯内存)
         run: npm run test:diff
 
-      - name: Regression (node-tree 类型解码, 火车票公开文件)
-        # /data 二进制不可字节复现, 用 MG_REGRESS_CACHE 落盘 + actions/cache 复用,
-        # 命中缓存时直接用本地快照跳过 47MB 下载。
-        run: |
-          mkdir -p "$HOME/.cache/mg"
-          if [ -f "$HOME/.cache/mg/regress.bin" ]; then
-            export MG_REGRESS_SRC="$HOME/.cache/mg/regress.bin"
-          fi
-          export MG_REGRESS_CACHE="$HOME/.cache/mg/regress.bin"
-          npm run test:regress
-        env:
-          CI: true
-      - name: Cache regress binary
+      # 必须放在使用它的步骤之前：actions/cache 在自身位置恢复、在 job 结束时保存
+      - name: Cache /data binaries
         uses: actions/cache@v4
         with:
           path: ~/.cache/mg
-          key: mg-regress-v1
+          key: mg-bin-v2
+
+      - name: Regression (node-tree 类型解码, 火车票公开文件)
+        # /data 二进制不可字节复现, 用 MG_REGRESS_CACHE 落盘 + 上面的 actions/cache 复用,
+        # 命中缓存时直接用本地快照跳过 47MB 下载。
+        run: |
+          mkdir -p "$HOME/.cache/mg"
+          export MG_REGRESS_CACHE="$HOME/.cache/mg/regress.bin"
+          [ -f "$MG_REGRESS_CACHE" ] && export MG_REGRESS_SRC="$MG_REGRESS_CACHE"
+          npm run test:regress
+        env:
+          CI: true
+
+      - name: Styles truth (样式/变量对浏览器真值, antd5 副本公开文件)
+        # 公开样本缺快照时自动匿名下载 ~105MB 并写回该路径，由上面的 cache 复用；
+        # 私有样本（新 ukey 编码）缺快照只跳过它自己，公开样本跑不起来则整体 fail。
+        run: |
+          mkdir -p "$HOME/.cache/mg"
+          MG_STYLE_SRC_ANTD="$HOME/.cache/mg/styles-antd.bin" npm run test:styles
 
       - name: Bundle (esbuild 单文件 CJS)
         run: npm run build:bundle

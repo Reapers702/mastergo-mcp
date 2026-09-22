@@ -7,7 +7,9 @@
 **10 个工具**可用：`get_file_meta` / `list_pages` / `get_file_nodes` / `get_page_tree` / `list_styles` / `list_text_styles` / `list_effect_styles` / `list_variables` / `list_components` / `diff_files`。
 
 - 节点树：legacy 828/828（0 错判）、modern 命中 8.3%（容器仍返回 `null`）
-- **样式与变量：已全面打通**，与浏览器真值逐条一致 —— 颜色 38/38、文字 13/13、效果 **34/34（antd5，90/90 项含全字段）**、变量 57/57
+- **样式与变量：已全面打通**，与浏览器真值逐条一致 —— 颜色 38/38、文字 13/13、效果 **34/34（antd5，90/90 项含全字段）**、变量 57/57；
+  数值型变量（CORNER_RADIUS/NUMBER）也已解出 `floatData`，antd5 **12/12 逐值一致**
+- **守卫：legacy（`test:regress`）+ modern（`test:styles`）双套都在 CI 里**，modern 侧公开样本自动匿名下载，缺快照不再静默跳过而是判失败
 - **组件：已打通（2026-09-20）**，`list_components` 交付，火车票 96/96 与真值一致
 
 ---
@@ -52,7 +54,7 @@
 01 <id> \0 02 <name> \0 03 61 <c> \0 [04 <desc> \0] 05 <n> [子块] 00 00 [06 01] 07 <ukey> \0
 ```
 
-- **`05 <n>` 才是类型判别式**：`1`=PAINT、`2`=EFFECT、`3`=TEXT（实测 57/57 纯净、零杂音）
+- **`05 <n>` 才是类型判别式**：`1`=PAINT、`2`=EFFECT、`3`=TEXT、`6`=数值型（CORNER_RADIUS/NUMBER，实测 57/57 纯净、零杂音）
 - ⚠️ `03 61 <c>`（a0/a1/aL…）**不是**类型：同类型的 c 各不相同（Purple=aL、Yellow=a1、Success=aF），只是个序号
 - **两套 ukey 编码**：新文件只存 `+<selfId>`（**不含 fileId**），旧文件存 `<fileId>+<selfId>`
 - `04 <desc>` 与 `06 01` 均可整体缺省（旧编码常见 `06 01`，新编码没有）
@@ -130,18 +132,19 @@
 
 ## P2 · 纯工程，不依赖真值
 
-### 7. 回归测试扩展 —— ✅ 已完成（2026-09-20）
+### 7. 回归测试扩展 —— ✅ 已完成（2026-09-20，modern 侧 2026-09-22 重写，见 12a）
 - `npm run test:regress`（**legacy 守卫，CI 可跑**）：节点类型 828/828 + 0 错判，**并已加入火车票 paint 样式断言 4 条**
-  （`渐变` / `f1f4fb` / `1` / `2`，含 ukey 前缀校验）与「文字样式 0 条」断言。
-- `npm run test:styles`（**modern 守卫，不进 CI**）：对照 `test/fixtures/truth_mobile_kit.json`（已入库，68KB）断言
-  颜色 **38/38**（SOLID 逐值 RGBA）、文字 **13/13**（fontSize/lineHeight/字体名）、效果 **6/6**、变量 **57/57**。
-  需 `.cache/mg_mobile_kit.bin`（私有文件快照，6.2MB，不入库；缺失时脚本提示并跳过），或用 `MG_STYLE_SRC=<路径>` 指定。
-- **为什么两套都要**：legacy 与 modern 是**两套 ukey 编码**，只测一个极易改坏另一个 ——
-  `list_styles` 漏检 bug 正是「modern 返回 0 条、legacy 看起来完全正常」。
-- ⚠️ **2026-09-21 复核发现：modern 守卫实际处于「静默跳过」状态** —— `test:styles` 依赖
-  `.cache/mg_mobile_kit.bin`（私有快照、不入库），本机当前**没有**该文件，脚本走
-  `verify-styles-truth.ts:51` 的「⏭ 跳过并 `exit 0`」；CI 也没挂这条。也就是说 modern 侧的
-  颜色/文字/效果/变量断言**目前无法复跑**，正是上面那句话点出的风险敞口。修法见下文 11。
+  （`渐变` / `f1f4fb` / `1` / `2`，含 ukey 前缀校验 + hex 值断言）与文字样式断言。
+- `npm run test:styles`（**modern 守卫，已进 CI**）：双样本 fail-closed ——
+  `antd_modern`（公开 `204971164239455`，真值 `test/fixtures/truth_antd_modern.json` 已入库，缺快照自动匿名下载 `/data` 并缓存）
+  + `mobile_kit`（私有 `107389953208823`，真值 `truth_mobile_kit.json` 已入库，需 `.cache/mg_mobile_kit.bin` 私有快照，缺失只跳过它自己）。
+  基线 paint 294 / text 61 / effect 43 / vars 414，并对 SOLID 颜色、文字 fontSize/lineHeight/字体/字间距、
+  效果 alpha/radius/offsetY、变量 type 与数值型 `floatData` **逐值断言**。
+- **为什么两套都要**：legacy 与 modern 是**两套 ukey 编码 + 两类样式短码锚点**，只测一个极易改坏另一个 ——
+  `list_styles` 漏检 bug 与「modern 文字样式整表读不出」都是「一侧全绿、另一侧归零」。
+- ~~⚠️ **2026-09-21 复核发现：modern 守卫实际处于「静默跳过」状态**~~ → **2026-09-22 已修**：
+  原先只依赖私有快照、缺失即 `exit 0`，CI 也没挂这条。现在公开样本自动下载、**一个样本都没跑起来就 `exit 1`**，
+  并且加了「快照 <64KB 判无效」的防护（Cookie 失效时 403 的 36 字节错误体曾被当成快照落盘 → 解出 0 条却全绿）。
 
 ### 8. 打包发布 —— ✅ 已完成（2026-09-20）
 - `package.json` 已补 `bin`（`mastergo-mcp` → `dist/index.cjs`）/ `files`，用 esbuild（`scripts/build.mjs`）出单文件 CJS，
@@ -159,9 +162,10 @@
 - `npm run test:diff`（`scripts/verify-diff.ts`）为纯内存自检，不依赖网络/二进制。
 - 切图 / 图片导出：**⚠️ 暂不考虑**（`window.mg` 里未见导出函数，逆向难度高）——**明确不主动做**，待开发者后期指明要求后再启动。
 
-### 10. CI 与端到端验证 —— ✅ 已完成（2026-09-21）
-- **GitHub Actions**（`.github/workflows/ci.yml`）：push/PR 触发，跑 `npm ci` → `tsc` → `test:diff` → `test:regress` → `build:bundle` → `test:e2e`。
-  `test:regress` 用公开文件（无需 Cookie）可在 CI 跑，并用 `MG_REGRESS_CACHE` 落盘 + `actions/cache`（key `mg-regress-v1`）复用二进制快照，命中时跳过 47MB 下载。
+### 10. CI 与端到端验证 —— ✅ 已完成（2026-09-21，2026-09-22 补 modern 守卫 + 修缓存顺序 bug）
+- **GitHub Actions**（`.github/workflows/ci.yml`）：push/PR 触发，跑 `npm ci` → `tsc` → `test:diff` → `test:regress` → `test:styles` → `build:bundle` → `test:e2e`。
+  `test:regress` / `test:styles` 用公开文件（无需 Cookie）可在 CI 跑，用 `~/.cache/mg` + `actions/cache`（key **`mg-bin-v2`**）复用二进制快照，命中时跳过 47MB / 105MB 下载。
+  ⚠️ **修了一个既有 bug**：`actions/cache` 步骤原先排在 `test:regress` **之后**，restore 发生在消费之后 → 缓存从未生效过。现已前置。
 - **端到端**（`npm run test:e2e`，`scripts/e2e-mcp.ts`）：以真实 MCP 客户端身份 spawn `dist/index.cjs`，
   走 JSON-RPC stdio 全链路 —— initialize → tools/list（断言 10 个工具）→ 依次调用
   `get_file_meta` / `list_pages` / `get_page_tree` / `diff_files` / `get_file_nodes` / `list_styles`，
@@ -183,11 +187,11 @@
 - 本地实测（2026-09-21）：全链路 PASS（tools 10/10、list_pages 74 页、get_page_tree 400 节点、
   get_file_nodes 144055 节点、diff_files 汇总正确）；`test:regress` 火车票 legacy 守卫 PASS。
 
-### 11. modern 样式守卫可复跑化 —— ⬜ 待做（2026-09-21 列为下一步，建议优先）
+### 11. modern 样式守卫可复跑化 —— ✅ 已完成（2026-09-22，落地细节见下文 12a）
 - **要解决的问题**：见上文 7 的 ⚠️ —— modern 编码的样式/文字/效果/变量解码现在**没有可复跑的自动化保护**
   （`test:styles` 因缺私有快照静默跳过，CI 未挂）。改 `list_styles`/`parseTextStyleBody`/效果解码时
   只能靠手工比对，历史 bug 就是这么漏过去的。
-- **建议做法**（照 `test:regress` 的既有模式抄即可）：
+- **原建议做法**（当时以为要「另找公开 modern 文件 + 种数据」）：
   1. 找一个**公开（`isPublic`）且带本地样式**的 modern 文件。⚠️ antd5 **不行** —— 它 445 个样式 ukey
      全部来自外部团队库，本地样式 0 条（见上文 10 末尾），正好会被守卫误判成「解码坏了」。
   2. 用已打通的 `window.mg` 真值导出链路（见「2026-09-20 的关键突破」第 0 节）导一次
@@ -195,12 +199,11 @@
   3. `test:styles` 改成：优先读 `MG_STYLE_SRC`/本地快照，缺失时**匿名下载** `/data/{fileKey}`，
      并支持 `MG_STYLE_CACHE` 落盘供 CI `actions/cache` 复用；真值缺失时报错而非 `exit 0`。
   4. CI 挂上（新增一个 cache key，别复用 `mg-regress-v1`）。
-- **工作量**：主要在「找到合适的公开 modern 文件 + 导一次真值」，代码改动本身不大。
-- **另一个可选替代**：把 `.cache/mg_mobile_kit.bin` 的快照以某种可分发形式留存（私有文件，需 Cookie，
-  故不适合进公开 CI）—— 因此优先选上面「换公开样本」的路线。
-  - **2026-09-22 更新：不用种数据了**，公开样本已经够用 —— 见下文 12。
+- **实际结果与第 1 步的判断相反**：antd5 **复制稿**（`204971164239455`，公开、匿名可下载）就是合格样本 ——
+  「本地样式 0 条」不是样本缺陷，而是 #12 那个漏检 bug 的表象（客户端算本地、二进制存源库 ukey）。
+  守卫改的是**先修解码、再按 selfId 对照真值**，不需要给文件「种」样式。第 2~4 步按原计划做完。
 
-### 12. 样式来源判据已改写（2026-09-22），modern 守卫样本随之到位 —— ⬜ 收尾未完
+### 12. 样式来源判据已改写（2026-09-22），modern 守卫已落地并进 CI —— ✅ 完成
 - **发现链**（为 #11 找样本时撞出来的）：`204971164239455`（antd5 的**复制稿**，`isPublic:true`、匿名可下载）
   浏览器真值有 **290 paint / 29 text / 34 effect，全部 `remote:false`**，而 `list_styles` 返回 0 条。
   挖到记录本身在表里：`01 138:58135\0 02 中性色板/Text/colorTextTertiary\0 … 05 01 00 06 01 07 122691166044911+138:58135\0`
@@ -208,25 +211,52 @@
 - **已改**：`scanStyleIndex` 不再按 `isExternal` 丢记录，4 个 `list*Styles` 全部返回，新增
   `sourceFileId`（= ukey 前缀）与 `isExternal`。语义与 `list_components` 早已有的做法对齐。
   `test:regress` 基线升级为「本地 4 + 库引用 86（总 90）」并校验两字段自洽；`test:e2e` 加断言
-  「antd5 条数 > 100 且 name 可正常读出」。tsc / test / regress 全绿。
+  「antd5 条数 > 100 且 name 可正常读出」。
 - **订阅表假设已证伪**（别再走）：`window.mg.teamLibrary` 确实给出订阅库（3 个，ukey 前缀
   `55113530176899`/`170598424868578`/`170601172976103`，复制稿的 `122691166044911` **不在**其中 → 客户端据此判本地）；
   但这三个前缀在该文件 `/data` 里 **0 命中**，而火车票二进制里 `55113530176899` 却有 9 条正经样式记录 ——
   **订阅关系不在二进制里**。在线接口 `GET /api/v1/users/team-libraries/styles?documentId=…` 能取到（1130 条，`key` 就是 `<libFileId>+<id>`），
   但**匿名 401**、对公开的火车票还 403 → 拿不到，进不了 CI。**结论：`isExternal` 只能表达「谁定义的」，
   不等于客户端的本地/远程；已在 README「样式来源判定」写明。**
-- **⬜ 剩余三项（#11 的收尾）**：
-  1. **文字样式在这个变体上全军覆没**：索引里 27 条 TEXT 记录，`parseTextStyleBody` 全部返回 null →
-     `list_text_styles` 0 条（真值 29）。已见线索：详情在**另一张表**里，形如
-     `01 <id>\0 02 00 03 00 04 00 05 03 01 00 03 <字体族> 04 <紧凑浮点 fontSize> 05 <紧凑浮点 lineHeight> 0c <PostScript> …`
-     （实测偏移 ~98469894 处，SF Pro Text / SFProText-Regular），与 mobile_kit 的「索引记录体内联字段」不同构。
-  2. **效果 43 vs 真值 34**：多出的 9 条待定性（可能是同库不同 collection 或假阳性）；
-     复制稿与官方 antd5 都是 43，说明是稳定值而非噪声。
-  3. **vars 364 vs 真值 365**，且真值里有 `CORNER_RADIUS 5` / `NUMBER 7` 两种**从未见过的 `05 <n>` 取值**
-     —— 判别式表 `STYLE_KIND_BY_N` 目前只有 1/2/3，值得顺手补全（也能让 `list_variables` 一次到位）。
-- **守卫落地路线**（比原 #11 简单）：真值直接从这个已登录的编辑器页导（`window.mg` 三件套 + `variables`），
-  快照用匿名 `/data/eb0ea904-aa4f-4e83-863b-5071a4d386a3`（实测 3.9s / 100.9MB）→ 可进 CI。
-  注意比对要按「`sourceFileId` 分组」而不是假设全是本地。
+
+#### 12a. 守卫本体（#11 的收尾）—— ✅ 已完成（2026-09-22）
+- `test/fixtures/truth_antd_modern.json`（177KB，**已入库**）= 浏览器 `window.mg` 导出的
+  290 paint / 29 text / 34 effect / 365 变量 + collections + meta（含 type 分布与 kind-6 的 `floatData` 真值）。
+- `scripts/verify-styles-truth.ts` 改成**双样本、fail-closed**：
+  `antd_modern`（公开，**自动匿名下载** `/data` + 落缓存，CI 必跑）+ `mobile_kit`（私有，缺快照只跳过它自己）。
+  **一个样本都没真跑起来就 `exit 1`** —— 静默跳过等于失效。
+- 记录数基线：paint 294 / text 61 / effect 43 / vars 414（均 ≥ 真值条数，多出来的是二进制里带着的**其他库**样式，按全量返回并标注来源）。
+- CI 新增 `test:styles` 步骤，`actions/cache` key 升为 `mg-bin-v2`；同时修掉一个**既有 CI bug**：
+  cache 步骤原先排在 `test:regress` **之后**，等于从来没命中过缓存。
+
+#### 12b. 三个「剩余项」的结论 —— 两个原判据假设被推翻
+1. ~~「27 条 TEXT 的详情在**另一张表**」~~ → **错的，根本不需要另一张表**。真因有三层，全部已修：
+   - **锚点**：这批文字样式的 `03 <c>` 是 `ZJ`/`ZR`/`E`/`N`… **不以 `a`(0x61) 开头**，而旧代码把 `03 61` 当硬锚点 → 整表 0 命中。
+     现对 TEXT 放宽锚点，改由「子块必须完整解析到 `07 <ukey>`」佐证（`a` 仍是必要主锚点：去掉后火车票 PAINT 候选 90→362）。
+   - **子块起点**：modern 文字子块以 `01 <1B>` 开头（legacy 是 `02 <3B>`），旧解析没跳。
+   - **0 值读取**：`04/05/08` 等字段值是 0 时只写 1 字节 `00`，按定长 4 字节读会读崩整块。
+   结果：antd5 真值 **29/29** 全覆盖（fontSize/lineHeight/PostScript/字间距逐值），火车票库引用文字样式 **4→10**（都是真实回收，已复核每条字段非空）。
+2. **效果 43 vs 真值 34**：多出的 9 条是**另一个订阅库**的记录（`sourceFileId` 非源库 `122691166044911`），
+   不是假阳性 —— 按「全量返回 + 标注来源」处理，真值 34 条逐条覆盖、90 个效果项 alpha/radius/offsetY 全对（本样本 0 个 null）。
+3. **`CORNER_RADIUS` / `NUMBER`（`05 06`）—— ✅ 已破解**：子块 `01 <sub> 02 <count> [<count> 个紧凑浮点/0]`，
+   `sub=3/count=4`→CORNER_RADIUS、`sub=1/count=1`→NUMBER，输出为变量的 `floatData`。
+   antd5 **12/12 条与浏览器 `modes["M:2"][0].floatData` 逐值一致**（`Padding`=16、`Padding XL`=32、圆角 `全圆角`=256000×4…），
+   已写成值级断言。⚠️ 反直觉处：圆角 `基础` 真值是 **6** 不是 antd token 的 8 —— **只能靠真值钉，不能按 token 表猜**。
+
+#### 12c. 连带修掉的一个系统性解码 bug（颜色）
+- `buildPaintTable` 原先按「首通道是基值 + r/g/b 定长 4 字节 + alpha 取 `09`」读颜色，**只在 alpha=1 的样本上碰巧正确**。
+  实际布局是 `08 <a><r><g><b>`，**通道序 a,r,g,b**、每通道「0 值压成单字节 `00`」，而 `09` 是另一个量（实测 1/0.65/0.45）。
+  任何**半透明或含 0 通道**的颜色都会解错（`08 00 00 00 00` 曾解出 `r=6e-39`）。已修正，antd5 SOLID **288/288** 逐值通过；
+  火车票本地颜色字节层 old-vs-new 对比**完全一致**（`probe_old_vs_new`，legacy 无退化）。
+
+#### 12d. 顺着这条线还能做什么（2026-09-22 收尾后新增）
+| 候选 | 入口 | 门槛 |
+| --- | --- | --- |
+| **效果 `type` 补全**（INNER_SHADOW / LAYER_BLUR / BACKGROUND_BLUR 的 `0d` 值） | `scanEffectTable` | 需一个含内阴影/模糊样式的文件导真值；antd5 只有 DROP_SHADOW |
+| **`textCase` / `decoration`** | `parseTextStyleBody` 的 `06`/`0b` | 需取样到非默认值。`createTextStyle` 会忽略这两个参数，只能**在编辑器 UI 里改**再建样式 —— 自动化控件命中不稳，是本项唯一阻塞 |
+| **GRID / PADDING / SPACING / STROKE_WIDTH 等样式族** | `window.mg` 有 `getLocalGridStyles` / `getLocalPaddingStyles` / `getLocalSpacingStyles` / `getLocalStrokeWidthStyles` | 大概率**不是新表**：数值族样式很可能就是 `05 <n>` 的其它取值（`05 06` 已被证实是数值型）。做法：导一次真值 → 看 `05 <n>` 与子块布局，`parseNumericStyleBody` 可直接复用 |
+| **多模式变量**（`modes` 不止 `M:2`） | `list_variables` | 需一个建了多模式的文件；现在只解首模式值 |
+| **modern 节点树容器类型**（FRAME/COMPONENT_SET 仍 `null`） | `decodeModernContainer` | 见 P3，两轮 n-gram 搜索无判别式，属硬骨头 |
 
 ---
 
@@ -238,29 +268,35 @@
 | COMPONENT_SET vs COMPONENT | 折叠为 COMPONENT | 最优候选判别式精确率仅 79%，会误标 7 个 COMPONENT |
 | 255 条「容器→LINE/RECTANGLE」 | 错判 | 让容器块压过叶子标记精确率仅 55% |
 | 文字样式的 textCase / decoration | 未输出 | 现有全部样式两个字段**全是同一个值**（ORIGINAL / NONE），无法验证枚举语义（`06`/`0b` 恒为 `01`） |
-| 变量 scopes / codeSyntax / 多模式 | 未输出 | 二进制内未定位到 scopes 字段；本文件只有 1 个模式 M:2，多模式无从验证 |
+| 变量 scopes / codeSyntax / 多模式 | 未输出 | 二进制内未定位到 scopes 字段；本文件只有 1 个模式 M:2，多模式无从验证（数值型变量该模式的值已解出为 `floatData`） |
+| 样式 `isExternal` 的「本地/远程」语义 | 只表达「谁定义的」 | 订阅关系既不在 `/data` 也取不到匿名接口（见 12）|
 
 ---
 
 ## 环境与踩坑备忘
 
-**构建与运行**（2026-09-20 在 macOS / Node 24 实测通过）
+**构建与运行**（本机 Windows / Node 24 与 CI ubuntu 均实测）
 - `npm run build`（tsc）✅ 通过
-- `npm run test:regress` ✅ PASS：828/828 = 100%、0 错判（**匿名下载** 47MB 公开文件，CI 可跑）
+- `npm run test:diff` ✅ / `npm run test:regress` ✅ 828/828 = 100%、0 错判 / `npm run test:styles` ✅（antd_modern 全绿，mobile_kit 缺私有快照干净跳过）
+- `npm run build:bundle` + `npm run test:e2e` ✅（spawn `dist/index.cjs`，10 工具、list_pages 74 页、get_file_nodes 144055 节点、list_styles 292 条）
 
 **素材位置**（`.cache/` 已 gitignore，不入库）
 | 文件 | 说明 |
 | --- | --- |
-| `test/fixtures/truth_mobile_kit.json` | **已入库**：移动端界面设计全部真值（样式 57 + 组件 144 + 变量 57 + 集合/组），供 `npm run test:styles` 使用 |
-| `.cache/mg_mobile_kit.bin` | 该文件 `/data` 快照，6.2MB |
+| `test/fixtures/truth_antd_modern.json` | **已入库**（177KB）：antd5 复制稿浏览器真值（290 paint / 29 text / 34 effect / 365 变量，含 12 条数值型变量的 `floatData`），`test:styles` 的 CI 侧判据本体 |
+| `test/fixtures/truth_mobile_kit.json` | **已入库**：移动端界面设计全部真值（样式 57 + 组件 144 + 变量 57 + 集合/组） |
+| `.cache/antd_sample.bin` | antd5 复制稿 `/data` 快照，100.9MB（**公开、脚本会自动匿名下载**，CI 用 `~/.cache/mg/styles-antd.bin`） |
+| `.cache/mg_mobile_kit.bin` | 移动端界面设计 `/data` 快照，6.2MB（**私有，需 Cookie**；当前 Cookie 对该文件 403，故只本地可选跑） |
 | `.cache/train_ticket.bin` | 火车票 `/data` 快照，47.9MB（公开，legacy 回归样本） |
-| `.cache/antd5.bin` | Ant Design 5 `/data` 快照，105.8MB（公开，modern e2e 样本） |
+| `.cache/antd5.bin` | Ant Design 5 官方文件 `/data` 快照，105.8MB（公开，modern e2e 样本） |
 | `.cache/post_server.cjs` | 真值导出用的本地 POST 接收器 |
 
 文件 id：
 - 移动端界面设计（**私有**）`107389953208823` / fileKey `2b195a62-0d3e-40ee-b55f-59b607e729a0`
 - 火车票（公开）`115278536821990` / fileKey `890c5c78-a533-4751-91ef-06e3fbb70d5e`
-- Ant Design 5（公开）`205140012617682` / fileKey `010e341a-0eae-49c9-a538-87932df0307d`
+- Ant Design 5 官方（公开）`205140012617682` / fileKey `010e341a-0eae-49c9-a538-87932df0307d`
+- Ant Design 5 **复制稿**（公开，`test:styles` 的 modern 样本）`204971164239455` / fileKey `eb0ea904-aa4f-4e83-863b-5071a4d386a3`
+  —— 样式源库为 `122691166044911`；e2e 用官方稿、守卫用复制稿，二者不要混
 
 **`/data` 接口三个反直觉特性**
 1. **不可字节复现**：同一未变动文件连续下载 md5 不同 → 回归按结构比对，别用 md5 / 整文件 diff
@@ -272,8 +308,10 @@
 自检：`82 00 00 80` → 12；`83 00 00 10` → 17。**0 值单独用 1 字节 `00` 表示**（不写 4 字节）。
 
 **写探针的约定**
-- `probe_*.mjs` 放项目根目录，**验证后删除**（本仓库既有约定）
-- 用 `npx tsx probe_xxx.mjs` 可直接 import `./src/node-tree.ts`
+- `probe_*.mts` 放项目根目录，**验证后删除**（本仓库既有约定）
+- ⚠️ **必须用 `.mts` 不能用 `.mjs`**：探针里要 import `../src/node-tree.ts` 的 TS 类型，`.mjs` 一旦被塞进类型标注就
+  `SyntaxError: Unexpected token ':'`；`node --experimental-strip-types probe_xxx.mts` 或 `npx tsx probe_xxx.mts` 都可跑
+- **`/data` 头部锚点**：`readCstr`（遇 `\0` 停）读 C 字符串；紧凑浮点见上；`05 <n>` 判别式表在 `node-tree.ts` 的 `STYLE_KIND_BY_N`
 
 **工具限制（已过时，勿再引用）**
 - ~~`browser-skill` 不支持任意页面 JS 求值~~ → **当前会话已支持**，`window.mg` 真值可导出

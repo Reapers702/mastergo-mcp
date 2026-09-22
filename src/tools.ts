@@ -16,7 +16,8 @@
  * 仍待加入：图片/切图导出（**暂不考虑**，待开发者后期指明再做，见 NEXT.md）。
  *
  * 样式与变量共用一张「样式索引表」，其类型判别式是记录内的 `05 <n>`：
- * n=1 → PAINT、n=2 → EFFECT、n=3 → TEXT（实测 57/57 纯净）。详见 node-tree.ts。
+ * n=1 → PAINT、n=2 → EFFECT、n=3 → TEXT、n=6 → 数值型（CORNER_RADIUS/NUMBER，
+ * 二者再由子块 `01 <sub>` 二选一）。详见 node-tree.ts。
  */
 
 import { z } from "zod";
@@ -227,7 +228,7 @@ export function buildTools(): ToolDef[] {
       description:
         "列出 MasterGo 文件内的 paint 样式（颜色样式）：id、名称、collection、ukey、paint 颜色、来源文件等。" +
         "通过浏览器 Cookie 全量下载 /data/{fileKey} 私有二进制，扫描样式索引表，" +
-        "按记录内 `05 <n>` 判类型（1=颜色 / 2=效果 / 3=文字）。" +
+        "按记录内 `05 <n>` 判类型（1=颜色 / 2=效果 / 3=文字 / 6=数值型，6 只在 list_variables 出现）。" +
         "返回该文件 `/data` 里出现的**全部**样式——本文件自建 + 团队库/复制带入——" +
         "由 `sourceFileId`（ukey 前缀）与 `isExternal`（sourceFileId ≠ fileId）标注来源；" +
         "⚠️ 从团队库**复制/另存**出的文件，二进制保留源库 ukey，故这些样式会被标为 isExternal=true，" +
@@ -328,16 +329,20 @@ export function buildTools(): ToolDef[] {
     {
       name: "list_variables",
       description:
-        "列出 MasterGo 文件内变量（Design Tokens）：id、名称、type（PAINT/EFFECT/TEXT）、collection、ukey、来源文件、颜色。" +
+        "列出 MasterGo 文件内变量（Design Tokens）：id、名称、type（PAINT/EFFECT/TEXT/CORNER_RADIUS/NUMBER）、" +
+        "collection、ukey、来源文件、颜色 color、数值 floatData。" +
         "返回该文件 `/data` 里出现的**全部**变量，用 `sourceFileId`/`isExternal` 标注来源（详见 list_styles 的说明）。" +
         "⚠️ 实测认知（纠正旧文档）：MasterGo 的「变量」与「样式」是**同一批对象**——浏览器真值中 " +
         "getLocalPaintStyles/getLocalTextStyles/getLocalEffectStyles 的 id 集合与 variables.getVariables() " +
         "的 id 集合双向完全包含（本文件各 57 个），变量 type 分布恰为 {PAINT:38, EFFECT:6, TEXT:13}。" +
         "即样式 API 是「按 type 过滤的视图」，本工具是「统一视图」。" +
         "实测（2026-09 移动端界面设计）：57/57 条 id/name/type 与浏览器 variables.getVariables() 真值一致。" +
+        "数值型变量（CORNER_RADIUS/NUMBER，索引里的 `05 06`）：`floatData` 逐元素对齐浏览器 " +
+        "modes['M:2'][0].floatData —— NUMBER 为单值（如 Padding=16），CORNER_RADIUS 为四角值（如 256000×4）；" +
+        "实测 antd5 副本 12 条与真值逐值一致。" +
         "collectionId 为 'M:1'、collectionName 为 '集合'（真值 getCollections() 证实 M:1 即本文件的默认变量集合，" +
         "模式 id 为 'M:2'，二者都是真实 id，而非客户端凭空构造）。" +
-        "未输出：scopes（二进制内未定位到该字段，不猜）、codeSyntax、多模式值。" +
+        "未输出：scopes（二进制内未定位到该字段，不猜）、codeSyntax、多模式值（仅首个模式 M:2）。" +
         "参数 file 传文件 ID 或完整 URL。",
       params: {
         file: z.string().describe("MasterGo 文件 ID 或完整文件 URL（必填）"),

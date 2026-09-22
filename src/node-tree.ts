@@ -245,6 +245,16 @@ function readCstr(buf: Buffer, p: number): { s: string; next: number } | null {
   return { s: buf.subarray(p, e).toString("utf8"), next: e + 1 };
 }
 
+/** 同 readCstr，但串超过 max 字节视为不匹配（用于短码字段，避免在二进制里长扫）。 */
+function readCstrShort(buf: Buffer, p: number, max: number): { s: string; next: number } | null {
+  if (p < 0 || p + max >= buf.length) return null;
+  for (let e = p; e < p + max; e++) {
+    if (buf[e] !== 0) continue;
+    return { s: buf.subarray(p, e).toString("utf8"), next: e + 1 };
+  }
+  return null;
+}
+
 /** 解析单个 `01 <id>\0` 节点记录：读 02/03/04 字段，返回 {id,parent,name,typeRaw,pos,geomPos} */
 interface RawRec {
   id: string;
@@ -541,20 +551,19 @@ function buildPaintTable(buf: Buffer): Map<string, PaintEntry> {
       break;
     }
     if (!selfId || !refId) continue;
-    // 解 08 后的 RGBA
+    // `08 <a> <r> <g> <b>`：四个通道各是「紧凑浮点，0 压成单字节 00」。
+    // ⚠️ 首通道就是**颜色 alpha**，不是什么基值；旧实现跳过首通道、转而从 `09` 取 alpha，
+    // 只在 alpha 恒为 1 的样本（移动端界面设计 / 火车票）上碰巧正确 —— antd5 副本里
+    // `0.45`/`0.25` 这类半透明色全部解错（`09` 是另一个量，样本里为 1 / 0.65 / 0.45，与 alpha 无关）。
+    // 同理，r/g/b 为 0 时只占 1 字节，按定长 4 字节读会整体错位。
     let p = off08 + 1;
     const f = (): number => {
-      const tag = buf[p];
-      const v = (0x1000000 + buf[p + 3] * 65536 + buf[p + 2] * 256 + buf[p + 1]) * Math.pow(2, tag - 151);
-      p += 4;
-      return v;
+      const r = readFloatOrZero(buf, p);
+      p = r.next;
+      return r.value;
     };
-    f(); // 跳过 alpha 基值（恒约 1）
-    const col: NodeColor = { r: f(), g: f(), b: f(), a: 1 };
-    if (buf[p] === 0x09) {
-      const tag = buf[p + 1];
-      col.a = (0x1000000 + buf[p + 4] * 65536 + buf[p + 3] * 256 + buf[p + 2]) * Math.pow(2, tag - 151);
-    }
+    const [ca, cr, cg, cb] = [f(), f(), f(), f()];
+    const col: NodeColor = { r: cr, g: cg, b: cb, a: ca };
     const entry: PaintEntry = { color: col, kind: "SOLID" };
     table.set(selfId, entry);
     if (refId !== selfId) table.set(refId, entry);
@@ -1254,22 +1263,32 @@ export function listLocalPaintStyles(buf: Buffer, fileId: string): PaintStyle[] 
 
 /**
  * 样式索引记录的种类。判别式是记录内的 `05 <n>` 字段（实测 57/57 纯净、零杂音）：
- *   n=1 → PAINT（颜色样式）、n=2 → EFFECT（效果样式）、n=3 → TEXT（文字样式）。
+ *   n=1 → PAINT（颜色样式）、n=2 → EFFECT（效果样式）、n=3 → TEXT（文字样式）、
+ *   n=6 → 数值型变量（CORNER_RADIUS / NUMBER），**n=6 还要再看子块首字段**才能二选一。
  *
  * 注意：记录里的 `03 61 <c>`（如 a0/a1/aL）**不是**类型判别式——同一类型的 c 各不相同
  * （Purple=aL、Yellow=a1、Success=aF 同为 PAINT），它只是一个序号，切勿据此判类型。
  */
-export type StyleKind = "PAINT" | "EFFECT" | "TEXT";
+export type StyleKind = "PAINT" | "EFFECT" | "TEXT" | "CORNER_RADIUS" | "NUMBER";
 
 const STYLE_KIND_BY_N: Record<number, StyleKind> = { 1: "PAINT", 2: "EFFECT", 3: "TEXT" };
+
+/** `05 06` = 数值型变量；CORNER_RADIUS 与 NUMBER 都编码为 6，需由子块 `01 <sub>` 二选一。 */
+const NUMERIC_STYLE_N = 0x06;
 
 /**
  * 一条样式索引记录。
  *
  * 记录格式（两套编码并存，差异只在 ukey 与可选的 `06 01`）：
- *   `01 <id> \0 02 <name> \0 03 61 <c> \0 04 <desc> \0 05 <n> [子块] 00 00 [06 01] 07 <ukey> \0`
- *   - 新编码（移动端界面设计，实测 57/57 命中）：ukey 只存 `+<selfId>`，**不含 fileId 前缀**
- *   - 旧编码（火车票）：ukey 存 `<fileId>+<selfId>`，且 `05` 块后多一个 `06 01`
+ *   `01 <id> \0 02 <name> \0 03 <c> \0 04 <desc> \0 05 <n> [子块] 00 00 [06 01] 07 <ukey> \0`
+ *   - `<c>` 是样式序号的短码（`a1` / `aL` / `aM  &` / `ZJ` / `ZR` / `E` / `N`…）：
+ *     首字母 `a`(0x61) 是**主锚点**（节点记录形似，靠它挡住），但 `a` **不是类型**，
+ *     同类型的 c 各不相同（Purple=aL、Yellow=a1）。TEXT 存在整批非 `a` 开头的编码
+ *     （antd5 副本的 29 条真值文字样式全是 `ZJ`/`ZR`/`E`/`N`…），故 TEXT 放宽锚点、
+ *     改由「子块必须完整解析到 ukey 字段」佐证，其余类型仍要求 `a` 开头
+ *   - 类型判别式是 `05 <n>`：1=PAINT、2=EFFECT、3=TEXT、6=数值型（CORNER_RADIUS/NUMBER）
+ *   - 新编码（移动端界面设计）：ukey 只存 `+<selfId>`，**不含 fileId 前缀**
+ *   - 旧编码（火车票、antd5 副本）：ukey 存 `<fileId>+<selfId>`，且子块后多一个 `06 01`
  *
  * ukey 前缀**只用于标注来源，不作过滤**。曾经的「前缀不等于本文件 fileId 就丢弃」是错的：
  * 从团队库**复制/另存**出来的文件，二进制里整批保留源库 ukey（实测 antd5 副本
@@ -1294,8 +1313,12 @@ export interface StyleIndexRecord {
   description: string;
   /** `05 <n>` 子块起点（文字样式的字段区从这里开始） */
   bodyPos: number;
-  /** ukey 字段结束位置 */
+  /** 记录末尾（ukey 字段之后的下一个字节） */
   end: number;
+  /** `07 <ukey>` 中 `07` 的位置：子块只解析到这儿，不含 ukey 本体 */
+  keyPos: number;
+  /** `03 <c>` 是否以 `a`(0x61) 开头 —— 主锚点；非 `a` 的只有 TEXT，且需子块完整解析佐证 */
+  anchored: boolean;
 }
 
 /** ukey 形如 `<fileId>+<selfId>` 或 `+<selfId>`（新编码省略 fileId）。 */
@@ -1304,20 +1327,28 @@ const UKEY_RE = /^([0-9]*)\+([0-9]+:[0-9A-Za-z]+)$/;
 /**
  * 扫描二进制中的全部样式索引记录（颜色/效果/文字样式与变量共用此表）。
  *
- * 锚点：`03 61 <c> 00 04`（类型块 + 描述字段），随后校验 `05 <n>` 合法、
+ * 锚点：`03 <c 以 a 开头> \0 [04 <desc> \0] 05 <n>`，随后校验 `<n>` 为已知类型，
  * 且窗口内存在合法 ukey 字段 `07 <ukey> \0` —— 后者是样式记录独有的，
  * 用于排除大量形似的节点记录（实测无 ukey 过滤时新文件匹配 225 条，加过滤后恰为 57 条真值）。
+ *
+ * ⚠️ 节点记录长成 `01 <id> 02 <name> 03 <c> 04 <类型名> 05 <n>`，其 `<n>` 是**节点类型**，
+ * 与样式类型编号撞车（3 在两边都可能出现），所以 `<c>` 的 `a` 前缀是必要的主锚点，不能整个去掉：
+ * 去掉后火车票的 PAINT 候选从 90 涨到 362。TEXT 放宽只配合「子块完整解析」这一额外佐证使用。
  */
 function scanStyleIndex(buf: Buffer, fileId: string): StyleIndexRecord[] {
   const out: StyleIndexRecord[] = [];
 
   for (let i = 0; i + 8 < buf.length; i++) {
-    if (!(buf[i] === 0x03 && buf[i + 1] === 0x61)) continue;
-    // `03 61 <c>`：c 是**变长 C 字符串**（legacy 多为单字节如 `34`，antd5 有多字节如 `49 38` / `4d 20 20 26`）。
-    // 旧的硬编码 `<c 单字节>\0`（buf[i+3]===0）会漏掉 antd5 的多字节 c，改按 C 字符串读取。
-    const c = readCstr(buf, i + 2);
+    if (buf[i] !== 0x03) continue;
+    // `03 <c>`：c 是样式序号短码。**绝大多数记录以 `a`(0x61) 开头**（`a1`/`aL`/`aM  &`…），
+    // 以它作锚点能挡掉海量形似的节点记录（节点记录同为 `01 id 02 name 03 c 04 类型名 05 n`）。
+    // 但文字样式存在整批非 `a` 开头的编码（antd5 副本的 29 条真值文字样式 c 全是 `ZJ`/`ZR`/`E`/`N`…），
+    // 因此对 TEXT 放开锚点，改由「子块必须完整解析到 ukey 字段」把关（见 parseTextStyleBody）。
+    const anchored = buf[i + 1] === 0x61;
+    // 非 `a` 锚点要求序号是短码（`ZJ`/`E`/`N`…）：既收紧判据，也避免在二进制里长扫
+    const c = anchored ? readCstr(buf, i + 2) : readCstrShort(buf, i + 2, 24);
     if (!c) continue;
-    // `04 <desc>` 在旧编码里可能整体省略（火车票部分记录直接 `03 61 XX 00 05 …`），故为可选
+    // `04 <desc>` 在旧编码里可能整体省略（火车票部分记录直接 `03 XX 00 05 …`），故为可选
     let p05 = c.next;
     let descText = "";
     if (buf[p05] === 0x04) {
@@ -1327,17 +1358,26 @@ function scanStyleIndex(buf: Buffer, fileId: string): StyleIndexRecord[] {
       p05 = d.next;
     }
     if (buf[p05] !== 0x05) continue;
-    const kind = STYLE_KIND_BY_N[buf[p05 + 1]];
+    const n = buf[p05 + 1];
+    // n=6 时 CORNER_RADIUS 与 NUMBER 共用一个编号，真判别式在子块首字段 `01 <sub>`：
+    // sub=3→四值圆角、sub=1→单值数字（值的布局见 parseNumericStyleBody）。
+    let kind: StyleKind | undefined = STYLE_KIND_BY_N[n];
+    if (n === NUMERIC_STYLE_N) {
+      const sub = buf[p05 + 3];
+      kind = sub === 3 ? "CORNER_RADIUS" : sub === 1 ? "NUMBER" : undefined;
+    }
     if (!kind) continue;
+    // 非 `a` 锚点目前只对 TEXT 开放：其他类型没有可靠的子块判据，放开会引入假阳性
+    if (!anchored && kind !== "TEXT") continue;
 
     // 在 `05` 之后的窗口内找 ukey 字段（子块长度可变，故用搜索而非定长跳过）
-    let uk: { s: string; next: number } | null = null;
+    let uk: { s: string; next: number; at: number } | null = null;
     const lim = Math.min(p05 + 600, buf.length - 1);
     for (let k = p05 + 2; k < lim; k++) {
       if (buf[k] !== 0x07) continue;
       const u = readCstr(buf, k + 1);
       if (u && UKEY_RE.test(u.s)) {
-        uk = u;
+        uk = { ...u, at: k };
         break;
       }
     }
@@ -1373,6 +1413,8 @@ function scanStyleIndex(buf: Buffer, fileId: string): StyleIndexRecord[] {
       description: descText,
       bodyPos: p05 + 2,
       end: uk.next,
+      keyPos: uk.at,
+      anchored,
     });
   }
 
@@ -1429,63 +1471,55 @@ function splitFontName(ps: string): { family: string; style: string } {
  *
  * 子块字段（legacy，13/13 与浏览器 `getLocalTextStyles()` 真值一致）：
  *   `02 <3B 字体族 id> 03 <字体名> \0 04 <紧凑浮点 fontSize> 05 <紧凑浮点 lineHeight>`
- *   `06 <1B textCase> 0b <1B> 0c <PostScript 名> \0 0e <紧凑浮点 fontSize×1.2> 0f <hash> \0`
+ *   `06 <1B> 0b <1B> 0c <PostScript 名> \0 0e <紧凑浮点 fontSize×1.2> 0f <hash> \0`
  *   - `0e` = fontSize × 1.2（Lato 12→14、16→19、20→24、40→48 全部验证通过），是自动行高建议值，不单独输出
  *   - `06`/`0b` 在本文件 13 个样式中恒为 `01`（对应 textCase=ORIGINAL），枚举语义尚未取样，故不输出
- * modern（antd5 等）为另一布局：`03 <字体名> \0 04 <fontSize> [08 <紧凑浮点 letterSpacing>] 0c <PostScript> \0 12 <json> \0 13 <8B> …`
- *   - `08`=字间距（紧凑浮点，仅非 0 时出现；样本 30 与浏览器真值一致，单位 PERCENT），已输出为 `letterSpacing`
+ * modern（antd5 等）为另一布局：
+ *   `01 <1B> 03 <字体名> \0 04 <fontSize> 05 <lineHeight> 06 <1B> 07 <1B> 08 <letterSpacing>`
+ *   `09/0a/0b/0d <1B> 0c <PostScript> \0 0e <1B> 0f <hash> \0 12 <字体 JSON> \0 13 <8B 字体记录>`
+ *   - 数值字段遵循紧凑浮点通则：**值为 0 时只写 1 字节 `00`**，非 0 才写 4 字节。
+ *     所以 `08 00` 是「字间距 0」而非「字段缺省」，此前把它当成缺省是因为 legacy 样本全为 0。
+ *   - `08`=字间距（antd5 样本 =30 与真值一致，单位 PERCENT）
+ * 解析区间为 `[bodyPos, keyPos)`，即不含结尾的 `07 <ukey>` 字段。
  */
 function parseTextStyleBody(buf: Buffer, rec: StyleIndexRecord): TextStyle | null {
   let p = rec.bodyPos;
-  if (buf[p] === 0x02) p += 4; // 字体族内部 id，固定 3 字节
+  if (buf[p] === 0x02) p += 4; // 字体族内部 id，固定 3 字节（legacy）
+  if (buf[p] === 0x01) p += 2; // modern：1 字节标志位
 
   let postScript: string | null = null;
   let fontHash: string | null = null;
   let fontSize: number | null = null;
   let lineHeight: number | null = null;
-  /** 字间距（紧凑浮点）。仅在非 0 时显式出现：tag `08`。单位默认 PERCENT（单样本 =30 验证）。 */
   let letterSpacingValue: number | null = null;
 
-  while (p < rec.end) {
+  while (p < rec.keyPos) {
     const tag = buf[p];
-    if (tag === 0x03 || tag === 0x0c) {
+    if (tag === 0x03 || tag === 0x0c || tag === 0x0f || tag === 0x12) {
       const s = readCstr(buf, p + 1);
-      if (!s) break;
-      postScript = s.s;
+      if (!s || s.next > rec.keyPos) break;
+      if (tag === 0x03 || tag === 0x0c) postScript = s.s; // 0c 在后，优先生效
+      else if (tag === 0x0f) fontHash = s.s;
       p = s.next;
-    } else if (tag === 0x04) {
-      fontSize = readCompactFloat(buf, p + 1);
-      p += 5;
-    } else if (tag === 0x05) {
-      lineHeight = readCompactFloat(buf, p + 1);
-      p += 5;
-    } else if (tag === 0x08) {
-      // modern（antd5）编码：字间距（紧凑浮点；0 时整字段缺省）
-      letterSpacingValue = readCompactFloat(buf, p + 1);
-      p += 5;
-    } else if (tag === 0x12) {
-      // modern 编码：额外字体 JSON 元数据（C 字符串），跳过
-      const s = readCstr(buf, p + 1);
-      if (!s) break;
-      p = s.next;
+    } else if (tag === 0x04 || tag === 0x05 || tag === 0x08 || tag === 0x0e) {
+      // 数值字段：0 压成单字节 00，非 0 为 4 字节紧凑浮点
+      const f = readFloatOrZero(buf, p + 1);
+      if (tag === 0x04) fontSize = f.value;
+      else if (tag === 0x05) lineHeight = f.value;
+      else if (tag === 0x08) letterSpacingValue = f.value;
+      p = f.next;
     } else if (tag === 0x13) {
-      // modern 编码：固定 8 字节字体记录，跳过
-      p += 8;
-    } else if (tag === 0x0e) {
-      p += 5;
-    } else if (tag === 0x0f) {
-      const s = readCstr(buf, p + 1);
-      if (!s) break;
-      fontHash = s.s;
-      p = s.next;
-    } else if (tag === 0x06 || tag === 0x0b) {
-      p += 2;
+      p += 9; // modern：固定 8 字节字体记录
+    } else if (tag === 0x06 || tag === 0x07 || (tag >= 0x09 && tag <= 0x0b) || tag === 0x0d) {
+      p += 2; // 1 字节枚举/标志
     } else {
       break; // 未知字段：宁可停止解析，也不猜错
     }
   }
 
   if (fontSize === null) return null;
+  // 非 `a` 锚点的记录放宽了头部判据，必须整块字段走到 ukey 才算数（挡住形似的节点记录）
+  if (!rec.anchored && p < rec.keyPos) return null;
 
   return {
     id: rec.id,
@@ -1742,7 +1776,7 @@ export function listLocalEffectStyles(buf: Buffer, fileId: string): EffectStyle[
 export interface VariableEntry {
   id: string;
   name: string;
-  /** PAINT / EFFECT / TEXT（即样式种类） */
+  /** PAINT / EFFECT / TEXT / CORNER_RADIUS / NUMBER（即样式种类，由 `05 <n>` 判出） */
   type: StyleKind;
   collectionId: string;
   collectionName: string;
@@ -1753,6 +1787,44 @@ export interface VariableEntry {
   description: string;
   /** PAINT 变量的颜色（走 paint 定义表）；EFFECT / TEXT 为 null */
   color: NodeColor | null;
+  /**
+   * 数值型变量（CORNER_RADIUS / NUMBER）的模式值，其余类型为 null。
+   * 布局与浏览器真值 `modes["M:2"][0].floatData` 逐元素对齐：
+   * NUMBER 是 1 个值（如 `[16]`），CORNER_RADIUS 是 4 个角值（如 `[8,8,8,8]`）。
+   */
+  floatData: number[] | null;
+}
+
+/**
+ * 解析数值型样式（`05 06`）的值子块。
+ *
+ * 布局（实测 antd5 副本，逐字节对照浏览器 floatData 真值）：
+ *   `01 <sub> 02 <count> [<count> 个「紧凑浮点或 0」] 00 00 [06 01]`
+ *   - `sub=3 / count=4` → CORNER_RADIUS（四角各一值，如全圆角 256000×4）
+ *   - `sub=1 / count=1` → NUMBER（单值，如 Padding=16）
+ * 值区必须整体落在记录内（不越过 `07 <ukey>`），否则判为杂音返回 null —— 这一条
+ * 兼作节点记录撞编号 6 的兜底判别。
+ */
+function parseNumericStyleBody(
+  buf: Buffer,
+  bodyPos: number,
+  keyPos: number,
+): { type: "CORNER_RADIUS" | "NUMBER"; values: number[] } | null {
+  if (buf[bodyPos] !== 0x01 || buf[bodyPos + 2] !== 0x02) return null;
+  const sub = buf[bodyPos + 1];
+  const count = buf[bodyPos + 3];
+  const type = sub === 3 ? "CORNER_RADIUS" : sub === 1 ? "NUMBER" : null;
+  if (!type) return null;
+  if (count !== (type === "CORNER_RADIUS" ? 4 : 1)) return null;
+  let p = bodyPos + 4;
+  const values: number[] = [];
+  for (let k = 0; k < count; k++) {
+    const f = readFloatOrZero(buf, p);
+    values.push(f.value);
+    p = f.next;
+  }
+  if (p > keyPos) return null;
+  return { type, values };
 }
 
 /**
@@ -1770,9 +1842,12 @@ export function listLocalVariables(buf: Buffer, fileId: string): VariableEntry[]
 
   for (const rec of scanStyleIndex(buf, fileId)) {
     let color: NodeColor | null = null;
+    let floatData: number[] | null = null;
     if (rec.kind === "PAINT") {
       const entry = paintMap.get(rec.id);
       color = entry ? entry.color : null;
+    } else if (rec.kind === "CORNER_RADIUS" || rec.kind === "NUMBER") {
+      floatData = parseNumericStyleBody(buf, rec.bodyPos, rec.keyPos)?.values ?? null;
     }
     out.push({
       id: rec.id,
@@ -1785,6 +1860,7 @@ export function listLocalVariables(buf: Buffer, fileId: string): VariableEntry[]
       isExternal: rec.isExternal,
       description: rec.description,
       color,
+      floatData,
     });
   }
 

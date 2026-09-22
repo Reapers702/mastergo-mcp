@@ -119,8 +119,9 @@ node dist/index.cjs --cookie "gfsessionid=..." --url https://mastergo.com
 > 对部分公开文件还会 403），无法离线获取，故复制稿的样式会被标成 `isExternal=true`。
 > 需要「只要本文件自建」时按 `sourceFileId === fileId` 过滤即可。
 >
-> 实测总数（含库引用）：antd5 官方文件 `205140012617682` → paint 290 / effect 43；
-> 火车票（legacy）→ paint 4 本地 + 86 库引用、文字 0 本地 + 4 库引用（`test:regress` 已把两个数都写进基线）。
+> 实测总数（含库引用）：antd5 副本 `204971164239455` → paint 294 / text 61 / effect 43 / 变量 414；
+> 火车票（legacy）→ paint 4 本地 + 86 库引用、文字 0 本地 + 10 库引用（`test:regress` 已把两个数都写进基线；
+> 文字从 4 涨到 10 是本轮放宽 TEXT 锚点 + 解出「0 值单字节」紧凑编码的真实回收，详见「回归测试」）。
 
 ## 回归测试（node-tree 类型解码守卫）
 
@@ -130,7 +131,7 @@ node dist/index.cjs --cookie "gfsessionid=..." --url https://mastergo.com
 | --- | --- | --- |
 | `npm test` → `test:diff` | diff 纯函数自检 | 无（纯内存，任何时候可跑） |
 | `npm run test:regress` | legacy 节点树类型 + 样式基线 | 匿名下载 47MB 公开文件（或 `MG_REGRESS_SRC` 指快照） |
-| `npm run test:styles` | modern 颜色/文字/效果/变量真值 | `.cache/mg_mobile_kit.bin`（私有快照，**不入库**；缺失时脚本提示并跳过） |
+| `npm run test:styles` | **modern** 颜色/文字/效果/变量对浏览器真值（含值级断言） | 公开样本 `antd_modern` **自动匿名下载 `/data` 并缓存**，CI 必跑；私有样本 `mobile_kit` 需 `.cache/mg_mobile_kit.bin`（**不入库**，缺失只跳过它一个） |
 | `npm run test:e2e` | MCP stdio 全链路 | 先 `npm run build:bundle` |
 
 `npm run test:regress` → 逐 PAGE 根 `parsePageTree`，断言节点类型解码不退化。
@@ -140,9 +141,24 @@ node dist/index.cjs --cookie "gfsessionid=..." --url https://mastergo.com
 - **本地加速**：已有快照时设 `MG_REGRESS_SRC` 指向它即可跳过下载；`MG_REGRESS_CACHE` 可把在线下载结果缓存一份供下次复用。
 - **比对方式**：**按结构/类型比对**，绝不 md5 / 整文件 diff——`/data` 响应不可字节复现（见上文）。
 
+### `test:styles`：modern 编码的真值守卫（2026-09）
+
+legacy 与 modern 是**两套 ukey 编码 + 两类样式序号短码**，只测一个极易改坏另一个，故本守卫跑两个样本：
+
+| 样本 | 可见性 | fileId | 编码特征 | 基线（记录数 / 真值条数） |
+| --- | --- | --- | --- | --- |
+| `antd_modern` | **公开**，CI 必跑 | `204971164239455`（antd5 副本） | 旧 ukey `<fileId>+<id>`、样式全部来自源库 `122691166044911`；TEXT 短码非 `a` 开头 | paint 294/290、text 61/29、effect 43/34、变量 414/365 |
+| `mobile_kit` | 私有，缺快照只跳过自己 | `107389953208823` | **新 ukey `+<id>`**（无前缀） | paint 38、text 13、effect 6、变量 57 |
+
+- **真值入库**：`test/fixtures/truth_antd_modern.json`（浏览器 `window.mg` 导出，含 12 条数值型变量的 `floatData`）。
+- **断言到值**：SOLID 颜色 RGBA、文字 fontSize/lineHeight/PostScript/字间距、效果 alpha/radius/offsetY、变量 type 与数值型 `floatData` 逐值对照；记录数按上表钉死基线，防漏读也防多读。
+- **⚠️ 静默跳过即失效**：只要**一个样本都没真正跑起来**就 `exit 1`（曾出现「私有快照 403 得到 36 字节错误体被当成快照 → 解出 0 条 → 全绿」的假通过，现已加最小体积校验）。
+- **本地快照**：`MG_STYLE_SRC_ANTD` / `MG_STYLE_SRC` 可分别指向两份 `/data` 快照跳过下载；私有样本获取方式见脚本头部注释。
+
 ## CI 与端到端验证（2026-09-21）
 
-- **GitHub Actions**（`.github/workflows/ci.yml`）：push/PR 触发，依次跑 `npm ci` → `tsc` → `test:diff` → `test:regress`（`actions/cache` 复用 47MB 二进制快照，key `mg-regress-v1`）→ `build:bundle` → `test:e2e`。
+- **GitHub Actions**（`.github/workflows/ci.yml`）：push/PR 触发，依次跑 `npm ci` → `tsc` → `test:diff` → `test:regress` → `test:styles` → `build:bundle` → `test:e2e`。
+  两个需要 `/data` 的步骤共用 `actions/cache`（key `mg-bin-v2`，缓存 `~/.cache/mg`）复用二进制快照，**cache 步骤必须排在消费者之前**（此前排在 `test:regress` 之后，等于从未命中过 —— 已修）。
 - **`npm run test:diff`**（`scripts/verify-diff.ts`）：diff 纯函数自检，纯内存、不依赖网络/二进制。
 - **`npm run test:e2e`**（`scripts/e2e-mcp.ts`）：以真实 MCP 客户端身份 spawn `dist/index.cjs`，走 JSON-RPC stdio 全链路——initialize → `tools/list`（断言 10 个工具齐全）→ 依次调用 `get_file_meta` / `list_pages` / `get_page_tree` / `diff_files` / `get_file_nodes` / `list_styles`，基于 **Ant Design 5 官方公开文件**（antd5，modern 格式 74 页，无需 Cookie），首次全量下载 ~106MB、进程内缓存复用。本地实测全链路 PASS（list_pages 74 页、get_file_nodes 144055 节点）。
 
@@ -204,12 +220,13 @@ dist/
   - **组件库已实现（2026-09-20）**：`list_components` 交付。实测认知：MasterGo 的「组件」**没有独立编码表**，本质是「带自引用 ukey 的容器节点」——组件 id 就是真实图层节点 id（`getComponentListVal()` 的 id 均为真实节点 id）。判据 = 节点几何段内含 `1c 07` 容器块、**且**该块内含自引用 ukey（`+<selfId>\0`，无需 fileId 前缀，格式无关，legacy/modern 通用，零假阳性）；ukey 前缀 `<fileId>+<selfId>` 用于判定是否本文件（`isExternal`）。实测（火车票公开文件）：**96/96** 条 id/name/ukey/width/height 与浏览器 `getComponentListVal()` 真值一致（含组件集内子组件，`parentId` 记录组件集归属）。
   - **样式索引表**（颜色/效果/文字样式与变量**共用同一张表**）记录格式：
     `01 <id>\0 02 <name>\0 03 61 <c>\0 [04 <desc>\0] 05 <n> [子块] 00 00 [06 01] 07 <ukey>\0`
-    - **`05 <n>` 才是类型判别式**：`1`=PAINT、`2`=EFFECT、`3`=TEXT（实测 57/57 纯净、零杂音）
+    - **`05 <n>` 才是类型判别式**：`1`=PAINT、`2`=EFFECT、`3`=TEXT、`6`=数值型（`CORNER_RADIUS`/`NUMBER`；实测 57/57 纯净、零杂音）。`6` 还要再看子块首字段 `05 06 01 <sub>` 才能二选一：`sub=3`→四值圆角、`sub=1`→单值数字。
     - ⚠️ `03 61 <c>`（a0/a1/aL…）**不是**类型：同一类型的 c 各不相同（Purple=aL、Yellow=a1、Success=aF 同为 PAINT），它只是一个序号
+    - **锚点与放宽（2026-09）**：`<c>` 以 `a`(0x61) 开头是**主锚点**——节点记录长成 `01 id 02 name 03 c 04 类型名 05 n`，其 `05 <n>` 是**节点类型**、与样式编号撞车（去掉 `a` 要求后火车票 PAINT 候选从 90 涨到 362），故 `a` 不能整个去掉。但**文字样式存在整批非 `a` 开头的编码**（antd5 副本 29 条真值文字样式 c 全是 `ZJ`/`ZR`/`E`/`N`…），此前按 `03 61` 硬锚点导致**整张 modern 文字样式表读不出来**；现对 TEXT 放宽锚点，改由「子块必须完整解析到 `07 <ukey>`」佐证（非 TEXT 类型无可靠子块判据，仍要求 `a`）
     - **两套 ukey 编码**：新文件只存 `+<selfId>`（**不含 fileId**），旧文件存 `<fileId>+<selfId>`；`04 <desc>` 与 `06 01` 均可整体缺省（旧编码常见 `06 01`，新编码没有）
     - 定位锚点用 `07 <ukey>\0`（样式记录独有，可排除大量形似的节点记录：不过滤时新文件匹配 225 条，过滤后恰为 57 条真值）
     - 本文件判定**不能**只靠 `ukey.startsWith(fileId + "+")`：新编码下必然 0 命中（这正是 `list_styles` 曾经的漏检 bug）
-  - **paint 定义表**：`01 <paintId>\0 02 <styleId>\0 03 61 30 00 04 00 08 <A><R><G><B>`，RGBA 走紧凑浮点。⚠️ paint 图元 id 可**省略数字前缀**（形如 `:005`），用严格的 `^\d+:\d+$` 校验会把整条记录跳过，导致所有样式颜色解成 `null`。
+  - **paint 定义表**：`01 <paintId>\0 02 <styleId>\0 03 61 30 00 04 00 08 <A><R><G><B>`，**通道顺序是 a,r,g,b**、每通道「0 值压成单字节 `00`、非 0 用 4 字节紧凑浮点」。⚠️ 曾按「首通道是基值 + r/g/b 定长 4 字节 + alpha 取 `09`」读取，只在 alpha=1 的样本上碰巧正确：任何**半透明或含 0 通道**的颜色都会解错（如 `08 00 00 00 00` 被读成 `r=6e-39`）。`09` 是另一个量（实测 1 / 0.65 / 0.45），**不是**颜色 alpha。antd5 逐值验证 288/288 SOLID 正确。⚠️ paint 图元 id 可**省略数字前缀**（形如 `:005`），用严格的 `^\d+:\d+$` 校验会把整条记录跳过，导致所有样式颜色解成 `null`。
   - **效果定义表**：`01 <effectId>\0 02 <refId>\0 03 61 <c> 00 04 00 05 <n> 08 <alpha><R><G><B> <09 <radius>> <0a <offsetX>> <0b <offsetY>> <0d <type>> <0e <2B>> <0f <spread>>`。0 值用单字节 `00`，非 0 用 4 字节紧凑浮点；`0d` 单字节 1=DROP_SHADOW、`0f`（spread）紧凑浮点，**负号=mantissa 最低字节 bit0 为 1**。`03 61` 后的 `<c>` 是**变长 C 字符串**（legacy 单字节如 `34`、antd5 多字节如 `4d 20 20 26`），须按 `readCstr` 读取而非硬编码单字节。
     - **顺序规则（关键）**：同一效果样式的多条效果项物理上**分散**在多个 `01 <effectId>` 定义记录里，且字节序与浏览器 API 真值**不一致**；需按每条 `01 <effectId>` 的**数字后缀降序**排序后才与真值完全对齐（antd5 34/34、90/90 项验证）。
     - **缺省规律（2026-09 破析）**：legacy 下 `09`/`0b` 会**整字段缺省**且缺省**不等于 0**，但 antd5（modern 编码）34 个效果样式 90 个效果项**全部含 09/0a/0b/0f**、无缺省反例 —— 说明缺省是 legacy 旧编码的历史行为。现按「字段出现则取值、未出现输出 null」处理。
@@ -217,10 +234,10 @@ dist/
     - **modern 布局（antd5 等，2026-09 破析）**：`03 <字体名>\0 04 <紧凑浮点 fontSize> [08 <紧凑浮点 letterSpacing>] 0c <PostScript 名>\0 12 <json 字体元数据>\0 13 <8B> …`。新增 `08`=**字间距**（**仅非 0 时出现**，0 则整字段缺省；单样本 `08 83 00 00 e0`=30 与浏览器真值一致，单位 PERCENT）。`08`/`12`/`13` 已纳入 `parseTextStyleBody`；modern 样式仅反解出 fontSize/字体/letterSpacing，lineHeight/hash 在该布局缺省。
     - ⚠️ 输出的 `fontName.family` 由 PostScript 名按最后一个 `-` 拆分，可能是**压缩形式**（二进制存 `OpenSans`，真值 API 返回 `Open Sans`）；需要精确字体名请用 `fontPostScriptName`。
   - 渐变样式（GRADIENT_LINEAR/RADIAL）已破解（2026-09）：渐变 paint 图元 `01 <selfId>\0 02 <refId>\0 03 61 <sub> 00 05 <kind> 08 …` 中 `<kind>` 判别类型（1=LINEAR、2=RADIAL），`08` 后是多色 stops + 手柄。紧凑数字约定 **0 值压成单字节 0x00、非 0 用 4 字节紧凑浮点**；stop 颜色按 **a,r,g,b** 顺序；stop0=`<color><position>`、其余= `01 <position> 02 <color>`；手柄 `0a 03 <h0> [04 <h1>]`（RADIAL 存两对、LINEAR 只存一对，第二个由轴默认推导未编码）。渐变 paint 的 refId 即所属样式 id，故按 refId 聚合到该样式。实测火车票 `渐变` 样式两笔渐变的 stops/handles 与浏览器真值**逐位一致**。
-- [x] **变量（Variables）**：已交付 `list_variables`，实测 **57/57** 条 id/name/type 与浏览器 `variables.getVariables()` 真值一致。
+- [x] **变量（Variables）**：已交付 `list_variables`，实测 **57/57** 条 id/name/type 与浏览器 `variables.getVariables()` 真值一致。数值型变量（`05 06` = CORNER_RADIUS/NUMBER）**已破解**，`floatData` 逐值命中 antd5 真值（详见 ⑤ 节）。
   - **重大认知纠正**：MasterGo 的**「变量」与「样式」是同一批对象**。浏览器真值交叉验证：`getLocalPaintStyles()` + `getLocalTextStyles()` + `getLocalEffectStyles()` 的 id 集合与 `variables.getVariables()` 的 id 集合**双向完全包含**（各 57 个），变量 `type` 分布恰为 `{PAINT: 38, EFFECT: 6, TEXT: 13}`。即样式 API 是「按 type 过滤的视图」、变量 API 是「统一视图」，二者共用同一张索引表 —— **破解变量 = 破解样式**。
   - **`M:1` / `M:2` 是真实 id**（纠正旧说法）：真值 `getCollections()` 返回 `[{id:"M:1", name:"集合", isExternal:false, modes:[{id:"M:2", name:"模式 1"}]}]`，并非客户端凭空构造的 pseudo-id；变量组 id 形如 `M:1_Neutrals`、`M:1_外部/Carbon Neutral`。
-  - 未输出：`scopes`（二进制内未定位到该字段）、`codeSyntax`、多模式值（本文件仅 1 个模式 `M:2`）。
+  - 未输出：`scopes`（二进制内未定位到该字段）、`codeSyntax`、多模式值（本文件仅 1 个模式 `M:2`；数值型变量的该模式值已解出为 `floatData`）。
 - [ ] **图片/切图导出**：节点导出为 PNG/SVG/PDF，可交付到本地目录。**⚠️ 暂不考虑**（`window.mg` 未见导出函数，功能缺口虽大但逆向难度高）——待开发者后期指明要求再做，见 NEXT.md。
 - [x] **设计稿差异对比**：`diff_files` 已交付（2026-09-21）。基于 `get_page_tree` 输出做两份快照的节点 diff（纯内存，不依赖真值）。匹配策略 `match_by`：`id`（默认，同文件不同版本，id 稳定）或 `path`（跨文件，按「根→节点的名称路径」匹配，重名兄弟按出现次序加 `#n` 消歧；节点改名表现为 removed+added）。输出 added/removed/changed 三类变更，changed 带字段级明细（如 `geometry.x`、`name`、`type`，数字按 1e-6 容差）；`ignore` 可跳过 `name`/`type`/`geometry` 或 geometry 子字段；`max_changes` 控制返回条数。`npm run test:diff` 为纯内存自检（不依赖网络/二进制）。
 - [x] **Cookie 过期检测 / 错误归一化**：`MasterGoError` + `toMasterGoError` 覆盖全部请求路径（含 `/data` 的 `arraybuffer` 错误体解码）。实测 `403 AccessDenied`（Cookie 失效 / 无权限）、`403 NotAllowAnonymousAccess`（文件未公开）、`NoDocumentPermission`、`NotFoundDocument`、`10003` 均给出可操作的中文提示；此前 `/data` 绕过归一化，失效时抛出**空消息**的原始 axios 错误，现已修复。
@@ -239,10 +256,10 @@ dist/
 
 - **真值来源 API**（浏览器里 `window.mg`，多为已暴露的导出函数）：`getLocalPaintStyles()`（颜色，已用）、`getLocalTextStyles()`（文字）、`getLocalEffectStyles()`（效果）、`getComponentListVal()`（组件）、variables 相关（见 ⑤）。先用 `Object.keys(window.mg)` 罗列可用函数再挑。
 - **连接浏览器**：chrome-devtools MCP（`server_name=mcp_plugin_Chrome_DevTools_chrome-devtools`）。先 `list_pages` 找到目标设计稿所在的标签页 id（火车票文件是 `pageId=2`），再 `evaluate_script` 传 `{ pageId, function: new Function(...) }`；注意**不要**传 `returnByValue`（不支持的参数）。
-- **存盘路径**：真值存 `%TEMP%/Trae/tools/` 下（例 `mng_rfsl.json`），二进制存 `%TEMP%/Trae/tools/mg_src.bin`（47.9MB，勿删）；probe 脚本放项目根目录、以 `probe_*.mjs` 命名，验证后删除。
+- **存盘路径**：入库真值统一放 `test/fixtures/truth_*.json`（如 `train_ticket_truth.json`、`truth_antd_modern.json`、`truth_mobile_kit.json`）；`/data` 二进制快照放 `.cache/*.bin`（**gitignore，不入库**）。probe 脚本放项目根目录、以 `probe_*.mts` 命名（**`.mjs` 跑不了 TS 类型标注**，`node --experimental-strip-types` 只认 `.mts`），验证后删除。
 - **本文件文件级 key**：fileId/`documentId = 115278536821990`，`fileKey = 890c5c78-...`（从 `get_file_meta` 拿）。ukey 前缀 = `115278536821990+`（**这是旧编码**）。
 - ⚠️ **ukey 有两套编码**：新文件（如「移动端界面设计」）的 ukey 只存 `+<selfId>`，**不含 fileId**。任何「按 ukey 前缀筛本文件」的写法都必须同时兼容两者，否则在新文件上必然 0 命中（`list_styles` 曾因此完全失效：真值 38 条、返回 0 条）。
-- **移动端界面设计（私有，新编码参考文件）**：fileId `107389953208823`，fileKey `2b195a62-0d3e-40ee-b55f-59b607e729a0`。含颜色样式 38 / 文字样式 13 / 效果样式 6 / 变量 57 / 组件 144，是样式与变量解码的**主要真值来源**。
+- **移动端界面设计（私有，新编码参考文件）**：fileId `107389953208823`，fileKey `2b195a62-0d3e-40ee-b55f-59b607e729a0`。含颜色样式 38 / 文字样式 13 / 效果样式 6 / 变量 57 / 组件 144，是样式与变量解码的**主要真值来源**。⚠️ 该私有快照需登录 Cookie 才能下 `/data`；**Cookie 失效时服务端返回 403 `AccessDenied`（约 36 字节的 JSON 错误体），把它当成快照落盘会让守卫解出 0 条却「绿」**——`test:styles` 已加「小于 64KB 的快照一律判无效」的防护。
 
 ### ① 自动布局（autoLayout）约束 —— 已完成（2026-09）
 - **结果**：已破解并落地到 `node-tree.ts` 的 `geometry.autoLayout`（`NodeAutoLayout` 接口 + `parseAutoLayout`）。
@@ -263,7 +280,7 @@ dist/
   - 火车票文件确实 0 个文字样式，但**新编码文件里有**；旧编码下 `04 <desc>` / `06 01` 可整体缺省，锚点需容忍。
 - **文字样式子块**（`05 03` 之后，**legacy**）：
   `02 <3B 字体族 id> 03 <字体名>\0 04 <紧凑浮点 fontSize> 05 <紧凑浮点 lineHeight> 06 <1B> 0b <1B> 0c <PostScript 名>\0 0e <紧凑浮点 fontSize×1.2> 0f <字体 hash>\0`
-- **modern 子块（antd5 等，2026-09）**：`03 字体名 04 fontSize [08 紧凑浮点 letterSpacing] 0c PostScript 12 json 13 (8B)`，`08` 字间距仅非 0 时出现。已在 antd5 可编辑文件取样：编辑器把字间距改 0%→30% 后 `createTextStyle` 建样式，反解 `08 83 00 00 e0`=30 ✓。
+- **modern 子块（antd5 等，2026-09）**：`[02 <3B>] [01 <1B>] 03 <字体名>\0 04 <fontSize> [08 <字间距>] 05 <lineHeight> … 0c <PostScript>\0 12 <json 字体元数据> 13 <8B> …`。⚠️ modern 记录**以 `01 <1B>` 开头**（legacy 是 `02 <3B>`），且 `04/05/08` 等数值字段遵循「0 值压成单字节 `00`」—— 此前按定长 4 字节读会把整块读崩。`08` 字间距仅非 0 时出现（antd5 取样：编辑器把字间距 0%→30% 后 `createTextStyle`，反解 `08 83 00 00 e0`=30 ✓）。放宽锚点 + 修 0 值读取后，antd5 真值 **29/29** 全覆盖、火车票库引用文字样式从 4 涨到 **10**（都是真实回收，见 `test:styles` 与 `test:regress` 基线）。子块解析以「走到 `07 <ukey>` 才算数」作非 `a` 锚点的佐证。
 - **仍未解出**：`textCase` / `decoration` 枚举语义 —— 现有所有样式两个字段**全是同一个值**（ORIGINAL / NONE），无法验证枚举语义；`createTextStyle` 的 textCase/decor 参数被忽略、编辑器控件自动化难以稳定命中，故未取样到非默认值。textCase 相关字节 `06`/`0b` 恒为 `01`。
 
 ### ③ 效果样式表（Effect Styles）—— ✅ 已完成（2026-09，含已知局限）
@@ -288,11 +305,14 @@ dist/
 
 ### ⑤ 变量（Variables / Design Tokens）—— ✅ 已完成（2026-09）
 - **已实现**：`list_variables` 工具。实测 **57/57** 条 id/name/type 与浏览器 `variables.getVariables()` 真值一致。
+- **数值型变量（`05 06` = CORNER_RADIUS / NUMBER）——2026-09 破解**：样式索引记录的子块布局
+  `01 <sub> 02 <count> [<count> 个「紧凑浮点或 0」] 00 00 [06 01]`，`sub=3/count=4`→CORNER_RADIUS（四角各一值）、`sub=1/count=1`→NUMBER（单值），输出为 `floatData`。
+  实测 antd5 副本 **12/12** 条与浏览器 `modes["M:2"][0].floatData` **逐值一致**（如 `Padding`=16、`Padding XL`=32、圆角 `全圆角`=[256000×4]），已写进 `test:styles` 的值级断言。⚠️ 圆角值并非 antd 令牌的直觉值（`基础` 真值是 6 不是 8），只能靠真值钉、不能凭 token 猜。
 - **重大认知纠正（推翻本节旧推测）**：
   - **「变量」与「样式」是同一批对象**：`getLocalPaintStyles()` + `getLocalTextStyles()` + `getLocalEffectStyles()` 的 id 集合与 `variables.getVariables()` 的 id 集合**双向完全包含**（各 57 个），变量 type 分布恰为 `{PAINT:38, EFFECT:6, TEXT:13}`。样式 API 是「按 type 过滤的视图」，变量 API 是「统一视图」，**破解变量 = 破解样式**。
   - **`M:1` / `M:2` 是真实 id**，并非客户端凭空构造的 pseudo-id：真值 `getCollections()` 返回 `[{id:"M:1", name:"集合", isExternal:false, modes:[{id:"M:2", name:"模式 1"}]}]`；变量组 id 形如 `M:1_Neutrals`、`M:1_外部/Carbon Neutral`。
   - `window.mg.variables` 是**对象**（不是函数），含 `getCollections` / `getVariables` / `getModes` / `getGroupList` / `getVariableById` 等。
-- **仍未解出**：`scopes`（真值中 PAINT 恒为 `fill/shapeFill/textFill/stroke`、其余为 `[]`，但二进制内未定位到该字段）、`codeSyntax`、多模式值（本文件仅 1 个模式 `M:2`，多模式无从验证）。
+- **仍未解出**：`scopes`（真值中 PAINT 恒为 `fill/shapeFill/textFill/stroke`、其余为 `[]`，但二进制内未定位到该字段）、`codeSyntax`、多模式值（本文件仅 1 个模式 `M:2`，数值型的该模式值已解出为 `floatData`，PAINT/TEXT/EFFECT 的值走各自定义表）。
 
 ### 既成工具的可复用输出
 - `get_page_tree` 的 `geometry` 已含 `fills/strokes/strokeWeight/strokeAlign/constraints/autoLayout/rotation/transform/x/y/width/height/cornerRadius`。

@@ -139,15 +139,23 @@ async function main() {
  * 这条守卫的意义：legacy 与 modern 是**两套 ukey 编码**，只测其中一个极易改坏另一个 ——
  * 历史上的 `list_styles` 漏检 bug 正是「在新编码上返回 0 条、在旧编码上看起来完全正常」。
  */
-const EXPECTED_STYLES: Array<{ id: string; name: string; kind: string }> = [
+const EXPECTED_STYLES: Array<{ id: string; name: string; kind: string; hex?: string }> = [
   { id: "5377:50013", name: "渐变", kind: "GRADIENT" },
-  { id: "5481:060489", name: "f1f4fb", kind: "SOLID" },
-  { id: "5481:060533", name: "1", kind: "SOLID" },
-  { id: "5481:060542", name: "2", kind: "SOLID" },
+  // ⚠️ 样式名不等于色值（"f1f4fb" 这条实测存 f5f6f9，另一条名为 "1" 的才是 f1f4fb）；
+  // 这里钉的是**解码值**，用于守 a,r,g,b 通道序与「0 值单字节」读取不退化。
+  { id: "5481:060489", name: "f1f4fb", kind: "SOLID", hex: "f5f6f9" },
+  { id: "5481:060533", name: "1", kind: "SOLID", hex: "f1f4fb" },
+  { id: "5481:060542", name: "2", kind: "SOLID", hex: "f2faf9" },
 ];
 /** 含库引用的总条数基线（改判据时必须一起看，防止「放宽变成乱放宽」） */
 const EXPECTED_PAINT_TOTAL = 90;
-const EXPECTED_TEXT_TOTAL = 4;
+/**
+ * 文字样式 4 → 10（2026-09-22）：索引锚点不再强求 `03 61`（`a` 前缀），
+ * TEXT 改由「子块完整解析到 ukey」佐证后，火车票多回 6 条库引用文字样式；
+ * 其中 3 条来自源库 81474543853270（Regular/Title2 等），另 3 条是原先子块解析
+ * 因「0 值单字节」编码而中断的记录。下面对全部条目加字段完整性断言，防止放宽变注水。
+ */
+const EXPECTED_TEXT_TOTAL = 10;
 
 function checkStyles(buf: Buffer): boolean {
   const fileId = "115278536821990";
@@ -184,6 +192,14 @@ function checkStyles(buf: Buffer): boolean {
     }
   }
 
+  // 文字样式条目必须字段齐全（锚点放宽后的注水防线：解不全的记录不该进入结果）
+  for (const t of allText) {
+    if (!t.name || t.fontSize === null || t.lineHeight === null || !t.fontPostScriptName) {
+      console.log(`  ❌ 文字样式 ${t.id} ${t.name} 字段不全: fs=${t.fontSize} lh=${t.lineHeight?.value} ps=${t.fontPostScriptName}`);
+      ok = false;
+    }
+  }
+
   for (const want of EXPECTED_STYLES) {
     const got = styles.find((s) => s.id === want.id);
     if (!got) {
@@ -198,6 +214,18 @@ function checkStyles(buf: Buffer): boolean {
     if (got.paints[0]?.kind !== want.kind) {
       console.log(`  ❌ ${want.id} kind: got=${got.paints[0]?.kind} want=${want.kind}`);
       ok = false;
+    }
+    if (want.hex) {
+      const c = got.paints[0]?.color;
+      const h = c ? [c.r, c.g, c.b].map((x) => Math.round(x * 255).toString(16).padStart(2, "0")).join("") : null;
+      if (h !== want.hex) {
+        console.log(`  ❌ ${want.id} 色值: got=${h}（${JSON.stringify(c)}）want=${want.hex}`);
+        ok = false;
+      }
+      if (c && c.a !== 1) {
+        console.log(`  ❌ ${want.id} alpha: got=${c.a} want=1（首通道即颜色 alpha）`);
+        ok = false;
+      }
     }
     // legacy 编码的 ukey 必须带 fileId 前缀，且被判定为本文件（未被误当外部引用）
     if (!got.ukey.startsWith(fileId + "+")) {
