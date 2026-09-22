@@ -254,8 +254,18 @@ dist/
     客户端源码里两者映射到**同一个 CppStyle** —— 变量 API 叫 `NUMBER`、样式 API 叫 `SPACING`，
     是同一批对象的两个视图（与「变量=样式」同源）。`list_variables` 按变量 API 输出 NUMBER（保持不变），
     `list_token_styles` 按样式 API 输出 SPACING。
-  - ⚠️ **已知局限**：`GRID` / `STROKE_WIDTH` 在现有**全部 6 份样本里出现 0 次**，其**值子块布局未知**，
-    故只登记类型、`values` 恒为 null（宁可判空也不猜）；PADDING 同样无正样本，但布局与 SPACING 同族。
+  - **GRID / STROKE_WIDTH 的值布局已补全**（2026-09-22，自己现造样本）：
+    - `STROKE_WIDTH`（`05 05`）值子块是 `02 <count> [<count> 个「紧凑浮点或 0」]`，
+      **没有 `01 <sub>` 前导**（与数值族不同）。四边宽度，如 `SW/1 → [1,1,1,1]`。
+    - `GRID`（`05 04`）的**样式记录 body 恒为空**（`00 00 06 01`）—— 值在**独立对象记录**里，
+      靠 `02 <styleId>` 反向指回样式：`01 <gridId> 02 <styleId> 03 <c> [字段区] 00`。
+      字段按号升序、**默认值一律省略**：`04`=gridType、`05`=color（**通道序 a,r,g,b**）、
+      `07`=sectionSize、`08`=alignment、`09`=count、`0a`=gutterSize、`0b`=offset、`0c`=isVisible。
+    - 实测 **GRID 5/5、STROKE_WIDTH 2/2** 与浏览器 `getLocalGridStyles()` /
+      `getLocalStrokeWidthStyles()` 真值逐字段一致（真值见 `test/fixtures/truth_grid_stroke.json`，
+      样本 `grid_stroke` 已进 `test:styles`，公开可匿名下载）。
+    - ⚠️ 未取样项返回 null 而非猜测：alignment 的 `LEFT`/`RIGHT`、gridType 的 `1`/`3`。
+  - ⚠️ **已知局限**：PADDING 仍无正样本（但布局与 SPACING 同族，按同族解析）。
   - **顺带修复**：此前 `05 04/05` 与 `05 06` 的未知 sub 会被**静默丢弃**，现在都会出现在结果里。
 - [x] **变量（Variables）**：已交付 `list_variables`，实测 **57/57** 条 id/name/type 与浏览器 `variables.getVariables()` 真值一致。数值型变量（`05 06` = CORNER_RADIUS/NUMBER）**已破解**，`floatData` 逐值命中 antd5 真值（详见 ⑤ 节）。
   - **重大认知纠正**：MasterGo 的**「变量」与「样式」是同一批对象**。浏览器真值交叉验证：`getLocalPaintStyles()` + `getLocalTextStyles()` + `getLocalEffectStyles()` 的 id 集合与 `variables.getVariables()` 的 id 集合**双向完全包含**（各 57 个），变量 `type` 分布恰为 `{PAINT: 38, EFFECT: 6, TEXT: 13}`。即样式 API 是「按 type 过滤的视图」、变量 API 是「统一视图」，二者共用同一张索引表 —— **破解变量 = 破解样式**。

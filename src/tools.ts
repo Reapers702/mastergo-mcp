@@ -376,20 +376,28 @@ export function buildTools(): ToolDef[] {
         "STROKE_WIDTH（描边宽度）、GRID（布局网格）—— 即浏览器 " +
         "getLocalSpacingStyles / getLocalPaddingStyles / getLocalCornerRadiusStyles / " +
         "getLocalStrokeWidthStyles / getLocalGridStyles 五个接口的统一离线实现。" +
-        "返回 id、name、type（族名）、ukey、来源文件（sourceFileId/isExternal）、description、values（数值）。" +
+        "返回 id、name、type（族名）、ukey、来源文件（sourceFileId/isExternal）、description、" +
+        "values（数值数组）、layoutGrids（仅 GRID 族）。" +
         "通过浏览器 Cookie 全量下载 /data/{fileKey} 私有二进制，扫描样式索引表，" +
         "族判别式取自 **MasterGo 客户端自身的枚举**（非猜测）：`05 <n>` 中 " +
         "1=PAINT、2=EFFECT、3=TEXT、4=GRID、5=STROKE、6=CUSTOM；" +
         "CUSTOM 再由子块 `01 <sub>` 细分：1=Spacing、2=Padding、3=Radius、4=CrossSpacing。" +
-        "值布局 `01 <sub> 02 <count> [<count> 个「紧凑浮点或 0」]`：" +
-        "SPACING 单值（如 `[8]`）、CORNER_RADIUS 四角（如 `[8,8,8,8]`）。" +
-        "实测（2026-09 antd5 副本 `204971164239455`）：SPACING **7/7**、CORNER_RADIUS **5/5** " +
-        "的 id/name/值 与浏览器 getLocalXxxStyles() 真值逐条一致。" +
+        "**值有三套布局**：" +
+        "① 数值族（CUSTOM）`01 <sub> 02 <count> [<count> 个「紧凑浮点或 0」]`：" +
+        "SPACING 单值（如 `[8]`）、CORNER_RADIUS 四角（如 `[8,8,8,8]`）；" +
+        "② STROKE_WIDTH `02 <count> [<count> 个「紧凑浮点或 0」]`（**无 `01 <sub>` 前导**）：四边宽度（如 `[1,1,1,1]`）；" +
+        "③ GRID 的 body 恒为空，值在**独立对象记录**里（`01 <gridId> 02 <styleId> 03 <c> [字段区] 00`），" +
+        "字段按号升序且**默认值一律省略**：04=gridType、05=color（通道序 a,r,g,b）、07=sectionSize、08=alignment、" +
+        "09=count、0a=gutterSize、0b=offset、0c=isVisible。" +
+        "实测：antd5 副本 `204971164239455` SPACING **7/7**、CORNER_RADIUS **5/5**；" +
+        "自建样本 `205234583944753` GRID **5/5**（含 GRID/COLUMNS 两类与默认值省略/非默认值两组）、" +
+        "STROKE_WIDTH **2/2** —— 均与浏览器 getLocalXxxStyles() 真值逐字段一致。" +
         "⚠️ **SPACING 与 NUMBER 是同一批对象**：二进制里完全同构（都是 CUSTOM+Spacing），" +
         "变量 API（list_variables）叫 NUMBER、样式 API 叫 SPACING —— 客户端源码里两者映射到同一个 " +
         "CppStyle，不是两个不同的东西。按变量视角取用请用 list_variables。" +
-        "⚠️ 已知局限：GRID / STROKE_WIDTH 的**值子块布局尚未取样**（现有全部样本中这两个族出现 0 次），" +
-        "故其 values 恒为 null（宁可判空也不猜）；PADDING 同样无正样本，但其布局与 SPACING 同族。" +
+        "⚠️ 已知局限：GRID 的 alignment 只有 `CENTER(3)` 与默认 `STRETCH` 取样过，" +
+        "LEFT/RIGHT 未取样故返回 null（不猜）；GRID 的 gridType 只有 `COLUMNS(2)` 有直接样本，" +
+        "GRID/ROWS 按枚举序推断；PADDING 无正样本，但其布局与 SPACING 同族。" +
         "参数 file 传文件 ID 或完整 URL。",
       params: {
         file: z.string().describe("MasterGo 文件 ID 或完整文件 URL（必填）"),

@@ -94,6 +94,12 @@ interface Sample {
   minRecords: { paint: number; text: number; effect: number; vars: number };
   /** 可选的「样式族」真值（getLocalSpacingStyles / getLocalPaddingStyles / … 的导出） */
   tokenTruthPath?: string;
+  /**
+   * 只跑样式族视图，跳过 paint/text/effect/vars 的逐条核对。
+   * 用于「为补某个样式族而专门现造」的小样本 —— 这类文件里根本没有其他样式，
+   * 且体积只有 KB 级（见 loadBinary 的小文件阈值）。
+   */
+  tokenOnly?: boolean;
 }
 
 const SAMPLES: Sample[] = [
@@ -119,6 +125,19 @@ const SAMPLES: Sample[] = [
     envVar: "MG_STYLE_SRC",
     public: false,
     minRecords: { paint: 38, text: 13, effect: 6, vars: 57 },
+  },
+  {
+    key: "grid_stroke",
+    label: "自建 GRID / STROKE_WIDTH 样本（公开，2026-09-22 用编辑器 UI 现造）",
+    fileId: "205234583944753",
+    fileKey: "bb3da168-0864-4eac-a22c-76f65f8e5772",
+    truthPath: "test/fixtures/truth_grid_stroke.json",
+    defaultSnapshot: ".cache/grid_sw.bin",
+    envVar: "MG_STYLE_SRC_GRID",
+    public: true,
+    tokenOnly: true,
+    minRecords: { paint: 0, text: 0, effect: 0, vars: 0 },
+    tokenTruthPath: "test/fixtures/truth_grid_stroke.json",
   },
 ];
 
@@ -172,7 +191,11 @@ for (const s of SAMPLES) {
     totalFail++;
     continue;
   }
-  totalFail += checkSample(s, JSON.parse(readFileSync(truthFile, "utf8")) as Truth, buf);
+  if (s.tokenOnly) {
+    console.log("  ⏭ 本样本只校验样式族（tokenOnly），跳过 paint/text/effect/vars");
+  } else {
+    totalFail += checkSample(s, JSON.parse(readFileSync(truthFile, "utf8")) as Truth, buf);
+  }
   // 样式族视图（SPACING/PADDING/CORNER_RADIUS/STROKE_WIDTH/GRID）另有一份真值，可选
   if (s.tokenTruthPath) {
     const tf = path.join(ROOT, s.tokenTruthPath);
@@ -185,10 +208,35 @@ for (const s of SAMPLES) {
   }
 }
 
+/** 布局网格对象（GRID 族的值载体，浏览器 `layoutGrids[]`）。 */
+interface TruthLayoutGrid {
+  gridType: string;
+  color?: { r: number; g: number; b: number; a: number };
+  sectionSize?: number;
+  isVisible?: boolean;
+  count?: number;
+  gutterSize?: number;
+  offset?: number;
+  alignment?: string;
+}
+
 /** 样式族真值（浏览器 getLocalSpacingStyles / getLocalPaddingStyles / … 导出）。 */
 interface TokenTruth {
   counts: Record<string, number>;
-  families: Record<string, Array<{ id: string; name: string; type: string; ukey: string; isExternal: boolean; value: Record<string, number[]> }>>;
+  families: Record<
+    string,
+    Array<{
+      id: string;
+      name: string;
+      type: string;
+      ukey: string;
+      isExternal: boolean;
+      /** 数值族（SPACING/PADDING/CORNER_RADIUS/STROKE_WIDTH）：如 `{spacing:[8]}`、`{width:[1,1,1,1]}` */
+      value?: Record<string, number[]>;
+      /** GRID 族专有 */
+      layoutGrids?: TruthLayoutGrid[];
+    }>
+  >;
 }
 
 /**
@@ -202,7 +250,8 @@ function checkTokenStyles(s: Sample, truth: TokenTruth, buf: Buffer): number {
   let fail = 0;
   const bad = (m: string) => { console.log("  ❌ " + m); fail++; };
   const all = listTokenStyles(buf, s.fileId) as unknown as Array<{
-    id: string; name: string; type: string; ukey: string; sourceFileId: string; isExternal: boolean; values: number[] | null;
+    id: string; name: string; type: string; ukey: string; sourceFileId: string; isExternal: boolean;
+    values: number[] | null; layoutGrids?: TruthLayoutGrid[];
   }>;
   const gotCounts: Record<string, number> = {};
   for (const r of all) gotCounts[r.type] = (gotCounts[r.type] ?? 0) + 1;
@@ -221,11 +270,54 @@ function checkTokenStyles(s: Sample, truth: TokenTruth, buf: Buffer): number {
       if (!g) { bad(`${apiType} 漏掉 ${w.id} ${w.name}`); continue; }
       if (g.name !== w.name) bad(`${apiType} ${w.id} name ${JSON.stringify(g.name)} ≠ ${JSON.stringify(w.name)}`);
       if (g.type !== apiType) { bad(`${apiType} ${w.id} 类型 ${g.type} ≠ ${apiType}`); continue; }
-      if (g.type === "GRID" || g.type === "STROKE_WIDTH") { checked++; continue; } // 值布局未取样，不比对
-      const key = Object.keys(w.value)[0];
-      const want2 = w.value[key];
+
+      // STROKE_WIDTH：值子块 `02 <count> [紧凑浮点×count]`，比对四边宽度数组
+      if (g.type === "STROKE_WIDTH") {
+        const wantW = w.value?.width;
+        const gotW = g.values;
+        if (!wantW || !gotW || gotW.length !== wantW.length || !wantW.every((v, i) => near(v, gotW[i]))) {
+          bad(`${apiType} ${w.id} ${w.name} 值 ${JSON.stringify(gotW)} ≠ 真值 ${JSON.stringify(wantW)}`);
+        } else checked++;
+        continue;
+      }
+
+      // GRID：值不在样式记录里，走 layoutGrids（字段默认值省略，故只比对真值出现的字段）
+      if (g.type === "GRID") {
+        const wantG = w.layoutGrids ?? [];
+        const gotG = g.layoutGrids ?? [];
+        if (gotG.length !== wantG.length) {
+          bad(`${apiType} ${w.id} ${w.name} layoutGrids 条数 ${gotG.length} ≠ 真值 ${wantG.length}`);
+          continue;
+        }
+        let gFail = 0;
+        wantG.forEach((wg, i) => {
+          const gg = gotG[i] as unknown as Record<string, unknown>;
+          for (const f of ["gridType", "sectionSize", "isVisible", "count", "gutterSize", "offset", "alignment"]) {
+            const expect = (wg as unknown as Record<string, unknown>)[f];
+            if (expect === undefined) continue;
+            if (gg[f] !== expect) {
+              bad(`${apiType} ${w.id} ${w.name} layoutGrids[${i}].${f} ${JSON.stringify(gg[f])} ≠ ${JSON.stringify(expect)}`);
+              gFail++;
+            }
+          }
+          if (wg.color) {
+            const gc = (gg.color ?? {}) as Record<string, number>;
+            for (const c of ["r", "g", "b", "a"]) {
+              if (!near(gc[c] ?? NaN, wg.color![c as "r"])) {
+                bad(`${apiType} ${w.id} ${w.name} layoutGrids[${i}].color.${c} ${gc[c]} ≠ ${wg.color![c as "r"]}`);
+                gFail++;
+              }
+            }
+          }
+        });
+        if (gFail === 0) checked++;
+        continue;
+      }
+
+      const key = Object.keys(w.value ?? {})[0];
+      const want2 = (w.value ?? {})[key];
       const got2 = g.values;
-      if (!got2 || got2.length !== want2.length || !want2.every((v, i) => near(v, got2[i]))) {
+      if (!want2 || !got2 || got2.length !== want2.length || !want2.every((v, i) => near(v, got2[i]))) {
         bad(`${apiType} ${w.id} ${w.name} 值 ${JSON.stringify(got2)} ≠ 真值 ${JSON.stringify(want2)}`);
       } else checked++;
     }
@@ -237,8 +329,11 @@ function checkTokenStyles(s: Sample, truth: TokenTruth, buf: Buffer): number {
 async function loadBinary(s: Sample, snapshot: string): Promise<Buffer> {
   if (existsSync(snapshot)) {
     const buf = readFileSync(snapshot);
-    // 36 字节的 `{"code":"AccessDenied"}` 也曾被当成快照落盘，太小的一律视为无效
-    if (buf.length < 64 * 1024) {
+    // 36 字节的 `{"code":"AccessDenied"}` 也曾被当成快照落盘，太小的一律视为无效。
+    // tokenOnly 样本（现造的小文件）本身就只有 KB 级，故阈值单独放宽 —— 但仍要挡住
+    // AccessDenied 那种错误响应，靠「头部签名 + 页面索引能解出」在调用方把关。
+    const minBytes = s.tokenOnly ? 512 : 64 * 1024;
+    if (buf.length < minBytes) {
       throw new Error(
         `快照 ${path.relative(ROOT, snapshot)} 只有 ${buf.length} 字节，不像是完整的 /data 二进制` +
           `（多半是 401/403 的错误响应），请删除后重新获取`
@@ -260,7 +355,8 @@ async function loadBinary(s: Sample, snapshot: string): Promise<Buffer> {
     maxContentLength: Infinity,
   });
   const buf = Buffer.from(res.data as ArrayBuffer);
-  if (buf.length < 1_000_000) throw new Error(`下载结果仅 ${buf.length} 字节，不像完整二进制`);
+  const minDownloaded = s.tokenOnly ? 512 : 1_000_000;
+  if (buf.length < minDownloaded) throw new Error(`下载结果仅 ${buf.length} 字节，不像完整二进制`);
   mkdirSync(path.dirname(snapshot), { recursive: true });
   writeFileSync(snapshot, buf);
   console.log(`  … 已缓存快照到 ${path.relative(ROOT, snapshot)}（${(buf.length / 1048576).toFixed(1)}MB）`);

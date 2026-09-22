@@ -1287,8 +1287,9 @@ export type StyleKind =
  * 在编辑器 JS 里 `PAINT=1, EFFECT=2, TEXT=3, GRID=4, STROKE=5, CUSTOM=6`，
  * 与我们**实测**的 1/2/3/6 完全吻合（`CUSTOM` 即数值型族）。
  * 出处：客户端 bundle `StyleToCppStyle` / `cppStyleTypeToPluginStyleType`。
- * ⚠️ GRID(4) / STROKE(5) 在现有全部样本里出现 0 次（无正样本可验），
- * 其**值子块布局未知**，故只登记类型、不解值（见 listTokenStyles）。
+ * ✅ GRID(4) / STROKE(5) 的值布局已于 2026-09-22 用**自建样本**（`205234583944753`）取样并验证：
+ * STROKE_WIDTH 值子块为 `02 <count> [紧凑浮点×count]`（**无 `01 <sub>`**），
+ * GRID 的 body 恒为空、值在独立对象记录里（见 LayoutGrid / scanLayoutGridObjects）。
  */
 const STYLE_KIND_BY_N: Record<number, StyleKind> = {
   1: "PAINT",
@@ -1926,6 +1927,38 @@ export function listLocalVariables(buf: Buffer, fileId: string): VariableEntry[]
 // 样式族视图（SPACING / PADDING / CORNER_RADIUS / STROKE_WIDTH / GRID）
 // ---------------------------------------------------------------------------
 
+/**
+ * 一个布局网格对象（浏览器 `layoutGrids[]` 的元素）。
+ *
+ * 与样式记录**分开存放**：GRID 样式的 body 恒为空（`00 00 06 01`），真正的值在
+ * 一条独立的对象记录里，靠 `02 <styleId>` 反向指向样式：
+ *   `01 <gridId> \0 02 <styleId> \0 03 <c> \0 [字段区] 00`
+ * 字段区**按字段号升序、且默认值一律省略**（实测 2026-09-22 自建样本 `205234583944753`）：
+ *   04 <n>              gridType（GRID 时省略；2=COLUMNS 实测）
+ *   05 <a><r><g><b>     color，四通道紧凑浮点、**通道序 a,r,g,b**、0 值压成单字节 `00`
+ *   07 <f>              sectionSize（省略 = 8）
+ *   08 <n>              alignment（STRETCH 时省略；3=CENTER 实测）
+ *   09 <f>              count（省略 = 8）
+ *   0a <f>              gutterSize（省略 = 16）
+ *   0b <f>              offset（省略 = 0）
+ *   0c <n>              isVisible（实测恒 01）
+ */
+export interface LayoutGrid {
+  /** 网格对象自身的 id */
+  id: string;
+  /** 引用它的样式 id（= 所属 TokenStyleEntry.id） */
+  styleId: string;
+  gridType: "GRID" | "COLUMNS" | "ROWS" | null;
+  color: { r: number; g: number; b: number; a: number } | null;
+  sectionSize: number | null;
+  /** 仅 COLUMNS / ROWS 有意义 */
+  count?: number;
+  gutterSize?: number;
+  offset?: number;
+  alignment?: string | null;
+  isVisible: boolean;
+}
+
 /** 一条「样式族」记录（对应浏览器 getLocalSpacingStyles / getLocalPaddingStyles 等）。 */
 export interface TokenStyleEntry {
   id: string;
@@ -1937,15 +1970,45 @@ export interface TokenStyleEntry {
   isExternal: boolean;
   description: string;
   /**
-   * 数值型族的值。布局 `01 <sub> 02 <count> [<count> 个「紧凑浮点或 0」]`：
-   * SPACING 单值（如 `[8]`）、CORNER_RADIUS 四角（如 `[8,8,8,8]`）。
-   * GRID / STROKE_WIDTH 的值子块布局**未取样**，恒为 null（不猜）。
+   * 数值型族的值（两套布局，差异在有无 `01 <sub>` 前导）：
+   *   - 数值族（CUSTOM，`05 06`）：`01 <sub> 02 <count> [<count> 个「紧凑浮点或 0」]`
+   *     —— SPACING 单值（如 `[8]`）、CORNER_RADIUS 四角（如 `[8,8,8,8]`）
+   *   - STROKE_WIDTH（`05 05`）：`02 <count> [<count> 个「紧凑浮点或 0」]`，**无 `01 <sub>`**
+   *     —— 四边宽度（如 `[1,1,1,1]`）
+   *   - GRID：body 恒为空，值走 layoutGrids
    */
   values: number[] | null;
+  /** GRID 族专有：该样式引用的布局网格对象（对应浏览器 `layoutGrids`）。其他族为 undefined。 */
+  layoutGrids?: LayoutGrid[];
 }
 
 /** 客户端枚举里的族名 → 本模块输出名（浏览器样式 API 的叫法）。 */
 const TOKEN_STYLE_KINDS: StyleKind[] = ["SPACING", "PADDING", "CORNER_RADIUS", "STROKE_WIDTH", "GRID"];
+
+/** `04 <n>` → gridType。仅 `2=COLUMNS` 有直接样本；1/3 按「默认值即枚举首项」推断。 */
+const GRID_TYPE_BY_N: Record<number, LayoutGrid["gridType"]> = {
+  1: "GRID",
+  2: "COLUMNS",
+  3: "ROWS",
+};
+
+/**
+ * `08 <n>` → alignment。**只有 `3=CENTER` 实测**（GRID/ALIGN 样本），
+ * STRETCH 是默认值（字段省略，由 GRID/COL 样本证实）。
+ * LEFT / RIGHT 未取样，故不映射 —— 遇到未知值返回 null 而不是猜。
+ */
+const GRID_ALIGN_BY_N: Record<number, string> = {
+  3: "CENTER",
+};
+
+/** 字段省略时的默认值（全部由自建样本 `205234583944753` 的 GRID/COL 证实）。 */
+const GRID_DEFAULTS = {
+  sectionSize: 8,
+  count: 8,
+  gutterSize: 16,
+  offset: 0,
+  alignment: "STRETCH",
+};
 
 /**
  * 扫描该文件 `/data` 里出现的**全部**「样式族」记录（含团队库/复制带入，按 sourceFileId 标注来源）。
@@ -1957,19 +2020,30 @@ const TOKEN_STYLE_KINDS: StyleKind[] = ["SPACING", "PADDING", "CORNER_RADIUS", "
  *   - `05 06` + 子块 `01 01` → SPACING（antd5 副本 `getLocalSpacingStyles()` **7/7** id/name/值一致）
  *   - `05 06` + 子块 `01 02` → PADDING（**无正样本**，布局与 SPACING 同族）
  *   - `05 06` + 子块 `01 03` → CORNER_RADIUS（`getLocalCornerRadiusStyles()` **5/5** 一致）
- *   - `05 05` → STROKE_WIDTH、`05 04` → GRID（**全部样本出现 0 次**，值布局未知，values 恒 null）
+ *   - `05 05` → STROKE_WIDTH（值子块 `02 <count> [紧凑浮点×count]`，见 parseStrokeWidthBody）
+ *   - `05 04` → GRID（**body 恒为空**，值在独立对象记录里，见 scanLayoutGridObjects）
  *
  * ⚠️ SPACING 与 NUMBER 在二进制里**完全同构**（都是 `CUSTOM+Spacing`）：变量 API 叫 NUMBER、
  * 样式 API 叫 SPACING。本函数按**样式 API** 的叫法输出 SPACING；变量视图见 listLocalVariables。
  */
 export function listTokenStyles(buf: Buffer, fileId: string): TokenStyleEntry[] {
+  const recs = scanStyleIndex(buf, fileId);
+  // GRID 的值不在样式记录里：先拿到全部 GRID 样式 id，再按 `02 <styleId>` 反向找网格对象
+  const gridIds = new Set(recs.filter((r) => r.kind === "GRID").map((r) => r.id));
+  const gridsByStyleId = scanLayoutGridObjects(buf, gridIds);
+
   const out: TokenStyleEntry[] = [];
-  for (const rec of scanStyleIndex(buf, fileId)) {
+  for (const rec of recs) {
     if (!TOKEN_STYLE_KINDS.includes(rec.kind)) continue;
-    const values =
-      rec.kind === "GRID" || rec.kind === "STROKE_WIDTH"
-        ? null
-        : parseNumericStyleBody(buf, rec.bodyPos, rec.keyPos)?.values ?? null;
+    let values: number[] | null = null;
+    let layoutGrids: LayoutGrid[] | undefined;
+    if (rec.kind === "STROKE_WIDTH") {
+      values = parseStrokeWidthBody(buf, rec.bodyPos, rec.keyPos);
+    } else if (rec.kind === "GRID") {
+      layoutGrids = gridsByStyleId.get(rec.id) ?? [];
+    } else {
+      values = parseNumericStyleBody(buf, rec.bodyPos, rec.keyPos)?.values ?? null;
+    }
     out.push({
       id: rec.id,
       name: rec.name,
@@ -1979,9 +2053,142 @@ export function listTokenStyles(buf: Buffer, fileId: string): TokenStyleEntry[] 
       isExternal: rec.isExternal,
       description: rec.description,
       values,
+      ...(layoutGrids ? { layoutGrids } : {}),
     });
   }
   return out;
+}
+
+/**
+ * 解析 STROKE_WIDTH 的值子块：`02 <count> [<count> 个「紧凑浮点或 0」]`。
+ *
+ * ⚠️ 与数值族（CUSTOM）**布局不同**：没有 `01 <sub>` 前导字段，首字节直接是 `02`。
+ * 实测（2026-09-22 自建样本 `205234583944753`，`getLocalStrokeWidthStyles()` 真值）：
+ *   SW/1 → `02 04 7f000000 ×4` → `[1,1,1,1]`
+ *   SW/2 → `02 04 80000000 ×4` → `[2,2,2,2]`
+ * count 恒为 4（四边宽度，与 CORNER_RADIUS 的四角同构）。
+ */
+function parseStrokeWidthBody(buf: Buffer, bodyPos: number, keyPos: number): number[] | null {
+  if (buf[bodyPos] !== 0x02) return null;
+  const count = buf[bodyPos + 1];
+  if (count < 1 || count > 8) return null;
+  let p = bodyPos + 2;
+  const values: number[] = [];
+  for (let k = 0; k < count; k++) {
+    const f = readFloatOrZero(buf, p);
+    values.push(f.value);
+    p = f.next;
+  }
+  if (p > keyPos) return null;
+  return values;
+}
+
+/**
+ * 扫描二进制里的**布局网格对象**（GRID 样式的值载体），按 `styleId` 归组。
+ *
+ * 判别式（三重，缺一不可）：
+ *   1. `01 <id>`、`02 <styleId>` 都必须是合法 id 形（`N:M`）
+ *   2. `02` 的值必须**命中一个已扫出的 GRID 样式 id** —— 这条是主锚点，把大量
+ *      形似的节点记录（`01 id 02 parent 04 类型 05 名称`）挡在外面
+ *   3. `03 <c>` 仍需 `a` 锚点，且字段区必须**干净地以 `00` 收尾**（见 parseLayoutGridFields）
+ */
+function scanLayoutGridObjects(buf: Buffer, gridStyleIds: Set<string>): Map<string, LayoutGrid[]> {
+  const out = new Map<string, LayoutGrid[]>();
+  if (gridStyleIds.size === 0) return out;
+
+  for (let i = 0; i + 8 < buf.length; i++) {
+    if (buf[i] !== 0x01) continue;
+    const ca = readCstr(buf, i + 1);
+    if (!ca || !ID_RE.test(ca.s)) continue;
+    if (buf[ca.next] !== 0x02) continue;
+    const cb = readCstr(buf, ca.next + 1);
+    if (!cb || !ID_RE.test(cb.s)) continue;
+    if (!gridStyleIds.has(cb.s)) continue;
+    if (buf[cb.next] !== 0x03) continue;
+    const cc = readCstr(buf, cb.next + 1);
+    if (!cc || cc.s[0] !== "a") continue;
+
+    const fields = parseLayoutGridFields(buf, cc.next);
+    if (!fields) continue;
+
+    const grid: LayoutGrid = { id: ca.s, styleId: cb.s, ...fields };
+    const arr = out.get(cb.s);
+    if (arr) arr.push(grid);
+    else out.set(cb.s, [grid]);
+  }
+  return out;
+}
+
+/**
+ * 解析网格对象的字段区（`03 <c> \0` 之后、记录结束的 `00` 之前）。
+ *
+ * 字段按编号升序排列，**默认值一律省略** —— 因此每个字段都要能区分
+ * 「显式存了」与「省略了」，后者回填 GRID_DEFAULTS。
+ * 遇到未知字段号立即停止（长度未知，继续读会错位），并要求最终恰好停在 `00` 上，
+ * 否则整条记录判为噪声返回 null。
+ */
+function parseLayoutGridFields(
+  buf: Buffer,
+  start: number,
+): Omit<LayoutGrid, "id" | "styleId"> | null {
+  let p = start;
+  let gridType: LayoutGrid["gridType"] = null;
+  let color: LayoutGrid["color"] = null;
+  let sectionSize: number | null = null;
+  let count: number | null = null;
+  let gutterSize: number | null = null;
+  let offset: number | null = null;
+  let alignment: string | null = null;
+  let isVisible = true;
+
+  while (p < buf.length) {
+    const f = buf[p];
+    if (f === 0x00) break;
+    if (f === 0x04) {
+      gridType = GRID_TYPE_BY_N[buf[p + 1]] ?? null;
+      p += 2;
+    } else if (f === 0x05) {
+      const a = readFloatOrZero(buf, p + 1);
+      const r = readFloatOrZero(buf, a.next);
+      const g = readFloatOrZero(buf, r.next);
+      const b = readFloatOrZero(buf, g.next);
+      color = { r: r.value, g: g.value, b: b.value, a: a.value };
+      p = b.next;
+    } else if (f === 0x07 || f === 0x09 || f === 0x0a || f === 0x0b) {
+      const v = readFloatOrZero(buf, p + 1);
+      if (f === 0x07) sectionSize = v.value;
+      else if (f === 0x09) count = v.value;
+      else if (f === 0x0a) gutterSize = v.value;
+      else offset = v.value;
+      p = v.next;
+    } else if (f === 0x08) {
+      alignment = GRID_ALIGN_BY_N[buf[p + 1]] ?? null;
+      p += 2;
+    } else if (f === 0x0c) {
+      isVisible = buf[p + 1] !== 0;
+      p += 2;
+    } else {
+      return null; // 未知字段：长度未知，宁可不解也不猜
+    }
+  }
+  // 必须干净收尾，否则视为噪声（这是挡节点记录撞锚点的最后一道关）
+  if (p >= buf.length || buf[p] !== 0x00 || !color) return null;
+
+  const type = gridType ?? "GRID";
+  const base: Omit<LayoutGrid, "id" | "styleId"> = {
+    gridType: type,
+    color,
+    sectionSize: sectionSize ?? GRID_DEFAULTS.sectionSize,
+    isVisible,
+  };
+  // count / gutterSize / offset / alignment 只对 COLUMNS / ROWS 有意义（GRID 类型的真值里没有这几项）
+  if (type === "COLUMNS" || type === "ROWS") {
+    base.count = count ?? GRID_DEFAULTS.count;
+    base.gutterSize = gutterSize ?? GRID_DEFAULTS.gutterSize;
+    base.offset = offset ?? GRID_DEFAULTS.offset;
+    base.alignment = alignment ?? GRID_DEFAULTS.alignment;
+  }
+  return base;
 }
 
 // ---------------------------------------------------------------------------

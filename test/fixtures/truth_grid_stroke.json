@@ -1,0 +1,224 @@
+{
+  "meta": {
+    "documentId": 205234583944753,
+    "name": "新文件",
+    "fileKey": "bb3da168-0864-4eac-a22c-76f65f8e5772",
+    "exportedAt": "2026-09-22T09:45:09.606Z",
+    "note": "自建样本：用编辑器 UI 现造 GRID/STROKE_WIDTH 样式后，从公开稿的 window.mg 导出（getLocalGridStyles / getLocalStrokeWidthStyles）。"
+  },
+  "counts": {
+    "grid": 5,
+    "padding": 0,
+    "spacing": 0,
+    "strokeWidth": 2,
+    "cornerRadius": 0
+  },
+  "families": {
+    "grid": [
+      {
+        "id": "1:67",
+        "ukey": "205234583944753+1:67",
+        "type": "GRID",
+        "isExternal": false,
+        "collectionId": "1:9",
+        "collectionName": "集合",
+        "name": "GRID/ALIGN",
+        "alias": "",
+        "description": "",
+        "codeSyntax": {},
+        "publishStatus": "UNPUBLISHED",
+        "layoutGrids": [
+          {
+            "color": {
+              "r": 1,
+              "g": 0.239215686917305,
+              "b": 0,
+              "a": 0.11999999731779099
+            },
+            "gridType": "COLUMNS",
+            "alignment": "CENTER",
+            "gutterSize": 16,
+            "count": 8,
+            "offset": 0,
+            "sectionSize": 8,
+            "styleId": "1:67",
+            "index": "1:68",
+            "isVisible": true,
+            "id": "1:68"
+          }
+        ]
+      },
+      {
+        "id": "1:56",
+        "ukey": "205234583944753+1:56",
+        "type": "GRID",
+        "isExternal": false,
+        "collectionId": "1:9",
+        "collectionName": "集合",
+        "name": "GRID/COL2",
+        "alias": "",
+        "description": "",
+        "codeSyntax": {},
+        "publishStatus": "UNPUBLISHED",
+        "layoutGrids": [
+          {
+            "color": {
+              "r": 1,
+              "g": 0.239215686917305,
+              "b": 0,
+              "a": 0.11999999731779099
+            },
+            "gridType": "COLUMNS",
+            "alignment": "STRETCH",
+            "gutterSize": 20,
+            "count": 4,
+            "offset": 5,
+            "sectionSize": 8,
+            "styleId": "1:56",
+            "index": "1:57",
+            "isVisible": true,
+            "id": "1:57"
+          }
+        ]
+      },
+      {
+        "id": "1:37",
+        "ukey": "205234583944753+1:37",
+        "type": "GRID",
+        "isExternal": false,
+        "collectionId": "1:9",
+        "collectionName": "集合",
+        "name": "GRID/COL",
+        "alias": "",
+        "description": "",
+        "codeSyntax": {},
+        "publishStatus": "UNPUBLISHED",
+        "layoutGrids": [
+          {
+            "color": {
+              "r": 1,
+              "g": 0.239215686917305,
+              "b": 0,
+              "a": 0.11999999731779099
+            },
+            "gridType": "COLUMNS",
+            "alignment": "STRETCH",
+            "gutterSize": 16,
+            "count": 8,
+            "offset": 0,
+            "sectionSize": 8,
+            "styleId": "1:37",
+            "index": "1:38",
+            "isVisible": true,
+            "id": "1:38"
+          }
+        ]
+      },
+      {
+        "id": "1:28",
+        "ukey": "205234583944753+1:28",
+        "type": "GRID",
+        "isExternal": false,
+        "collectionId": "1:9",
+        "collectionName": "集合",
+        "name": "GRID/12",
+        "alias": "",
+        "description": "",
+        "codeSyntax": {},
+        "publishStatus": "UNPUBLISHED",
+        "layoutGrids": [
+          {
+            "color": {
+              "r": 0,
+              "g": 0.4000000059604645,
+              "b": 1,
+              "a": 0.11999999731779099
+            },
+            "gridType": "GRID",
+            "sectionSize": 12,
+            "styleId": "1:28",
+            "index": "1:29",
+            "isVisible": true,
+            "id": "1:29"
+          }
+        ]
+      },
+      {
+        "id": "1:11",
+        "ukey": "205234583944753+1:11",
+        "type": "GRID",
+        "isExternal": false,
+        "collectionId": "1:9",
+        "collectionName": "集合",
+        "name": "GRID/8",
+        "alias": "",
+        "description": "",
+        "codeSyntax": {},
+        "publishStatus": "UNPUBLISHED",
+        "layoutGrids": [
+          {
+            "color": {
+              "r": 1,
+              "g": 0.239215686917305,
+              "b": 0,
+              "a": 0.11999999731779099
+            },
+            "gridType": "GRID",
+            "sectionSize": 8,
+            "styleId": "1:11",
+            "index": "1:12",
+            "isVisible": true,
+            "id": "1:12"
+          }
+        ]
+      }
+    ],
+    "padding": [],
+    "spacing": [],
+    "strokeWidth": [
+      {
+        "id": "1:16",
+        "ukey": "205234583944753+1:16",
+        "type": "STROKE_WIDTH",
+        "isExternal": false,
+        "collectionId": "1:9",
+        "collectionName": "集合",
+        "name": "SW/2",
+        "alias": "",
+        "description": "",
+        "codeSyntax": {},
+        "publishStatus": "UNPUBLISHED",
+        "value": {
+          "width": [
+            2,
+            2,
+            2,
+            2
+          ]
+        }
+      },
+      {
+        "id": "1:01",
+        "ukey": "205234583944753+1:01",
+        "type": "STROKE_WIDTH",
+        "isExternal": false,
+        "collectionId": "1:9",
+        "collectionName": "集合",
+        "name": "SW/1",
+        "alias": "",
+        "description": "",
+        "codeSyntax": {},
+        "publishStatus": "UNPUBLISHED",
+        "value": {
+          "width": [
+            1,
+            1,
+            1,
+            1
+          ]
+        }
+      }
+    ],
+    "cornerRadius": []
+  }
+}

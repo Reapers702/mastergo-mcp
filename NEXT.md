@@ -284,9 +284,36 @@ CUSTOM 子类型（= 子块 `01 <sub>`）：NONE=0, Spacing=1, Padding=2, Radius
 客户端里两者映射到同一个 CppStyle，只是变量 API 叫 NUMBER、样式 API 叫 SPACING。
 （再次印证「变量 = 样式」。）
 
-**未完成部分**：`GRID`/`STROKE_WIDTH` 在**全部 6 份样本里出现 0 次**，值子块布局未知，
-故只登记类型、`values` 恒 null。要补全需要一份**含网格样式 / 描边宽度样式**的文件导真值
-（公开的 antd5 官方稿与副本里这两个族都是 0）。
+**GRID / STROKE_WIDTH 的值布局（2026-09-22 二次补全，已交付）**：
+上一版这两个族在**全部 6 份样本里出现 0 次**，只能登记类型、`values` 恒 null。
+本轮改为**自己现造样本**：在编辑器 UI 里新建文稿 → 加描边宽度样式 / 布局网格样式 → 用
+`window.mg.getLocalGridStyles()` 导真值 → 下载 `/data` 逐字节对照。一次拿全两族：
+
+- **STROKE_WIDTH**（`05 05`）：值子块 `02 <count> [<count> 个「紧凑浮点或 0」]`，
+  **没有 `01 <sub>` 前导**（这点与数值族不同，是踩坑点）。
+  `SW/1 → 02 04 7f000000 ×4 = [1,1,1,1]`、`SW/2 → 02 04 80000000 ×4 = [2,2,2,2]`。
+- **GRID**（`05 04`）：**样式记录的 body 恒为空**（`00 00 06 01`）—— 值不在样式表里，
+  而在一条**独立的对象记录**中，靠 `02 <styleId>` 反向指回样式：
+  `01 <gridId> \0 02 <styleId> \0 03 <c> \0 [字段区] 00`。
+  字段区**按字段号升序、且默认值一律省略**，故必须能区分「显式存了」与「省略了」：
+
+  | 字段 | 含义 | 省略时默认 |
+  | --- | --- | --- |
+  | `04 <n>` | gridType | `GRID`（`2=COLUMNS` 实测） |
+  | `05` | color，**通道序 a,r,g,b**，0 值压单字节 `00` | — |
+  | `07 <f>` | sectionSize | 8 |
+  | `08 <n>` | alignment | `STRETCH`（`3=CENTER` 实测） |
+  | `09 <f>` | count | 8 |
+  | `0a <f>` | gutterSize | 16 |
+  | `0b <f>` | offset | 0 |
+  | `0c <n>` | isVisible | true（实测恒 `01`） |
+
+  实测对照（`test/fixtures/truth_grid_stroke.json`）：GRID **5/5**、STROKE_WIDTH **2/2**，
+  含「默认值全省略」（GRID/COL）与「非默认值显式存」（GRID/12、GRID/COL2、GRID/ALIGN）两组，
+  已进 `test:styles`（新增 `grid_stroke` 样本，公开可匿名下载，1.6KB）。
+
+**未取样项（代码里显式返回 null，不猜）**：alignment 的 LEFT/RIGHT、gridType 的 `1`/`3`
+（`GRID`/`ROWS` 按「默认值即枚举首项」与枚举序推断，注释已标明）。
 
 ### B. 真值导出的新姿势：**公开文件也能跑 `window.mg`**（省掉登录）
 
@@ -294,6 +321,21 @@ CUSTOM 子类型（= 子块 `01 <sub>`）：NONE=0, Spacing=1, Padding=2, Radius
 编辑器加载后 `window.mg` 就是完整的 99 键插件 API，`browser_execute` 可直接调
 `getLocalSpacingStyles()` 等。配合 `.cache/post_server.cjs` 落盘真值即可。
 本次即用此法拿到 `truth_numeric_families.json`。
+
+**配套三招（本轮补全 GRID/STROKE_WIDTH 时全部用到）**：
+
+1. **fileKey 不用翻 DevTools**：`GET /api/v1/documents/<fileId>` 的响应里直接有 `fileKey`
+   （页面上下文里 `fetch(..., {credentials:'include'})` 即可），拿到就能匿名下 `/data/{fileKey}`。
+2. **`createXxxStyle()` 全是「从图层存样式」**，不是凭空建：直接调会报
+   `layer does not contain grid style` / `Expected to get the value of 'id'`。
+   正路是**在编辑器 UI 里造**（面板 → 布局网格 `+` → 条目 → 四宫格「应用样式」→ 创建样式）。
+3. **要造出「非默认值」样本才有判别力**：默认值在二进制里一律省略，
+   只造默认样本会误以为「字段根本不存在」——`count/gutterSize/offset/alignment` 四个字段
+   全靠 GRID/COL2（4 列 / 槽宽 20 / 边距 5）与 GRID/ALIGN（居中）才定位到。
+
+> 浏览器 UI 坐标注意：`browser_execute` 报的 `innerWidth` 才是 CSS 坐标基准，
+> 截图可能被 DPR 放大 —— 直接点截图像素坐标会点空（本轮踩过，x=1470 在 1400 宽视口外）。
+> 稳妥做法是用 DOM `getBoundingClientRect()` 取坐标，或按 `path` 的 `d` 属性辨认「+ / 四宫格 / −」按钮。
 
 ### C. ⚠️ P0 踩坑：`/data` 头部签名的版本字节会变
 
@@ -335,7 +377,9 @@ legacy → `list_pages` **0 页**、`get_file_nodes` 从 144055 条掉到 **1 �
 | --- | --- |
 | `test/fixtures/truth_antd_modern.json` | **已入库**（177KB）：antd5 复制稿浏览器真值（290 paint / 29 text / 34 effect / 365 变量，含 12 条数值型变量的 `floatData`），`test:styles` 的 CI 侧判据本体 |
 | `test/fixtures/truth_mobile_kit.json` | **已入库**：移动端界面设计全部真值（样式 57 + 组件 144 + 变量 57 + 集合/组） |
+| `test/fixtures/truth_grid_stroke.json` | **已入库**：自建 GRID/STROKE_WIDTH 真值（GRID 5 + STROKE_WIDTH 2），`test:styles` 的 `grid_stroke` 样本判据 |
 | `.cache/antd_sample.bin` | antd5 复制稿 `/data` 快照，100.9MB（**公开、脚本会自动匿名下载**，CI 用 `~/.cache/mg/styles-antd.bin`） |
+| `.cache/grid_sw.bin` | 自建 GRID/STROKE_WIDTH 样本 `/data` 快照，1.6KB（**公开、脚本会自动匿名下载**） |
 | `.cache/mg_mobile_kit.bin` | 移动端界面设计 `/data` 快照，6.2MB（**私有，需 Cookie**；当前 Cookie 对该文件 403，故只本地可选跑） |
 | `.cache/train_ticket.bin` | 火车票 `/data` 快照，47.9MB（公开，legacy 回归样本） |
 | `.cache/antd5.bin` | Ant Design 5 官方文件 `/data` 快照，105.8MB（公开，modern e2e 样本） |
@@ -347,6 +391,10 @@ legacy → `list_pages` **0 页**、`get_file_nodes` 从 144055 条掉到 **1 �
 - Ant Design 5 官方（公开）`205140012617682` / fileKey `010e341a-0eae-49c9-a538-87932df0307d`
 - Ant Design 5 **复制稿**（公开，`test:styles` 的 modern 样本）`204971164239455` / fileKey `eb0ea904-aa4f-4e83-863b-5071a4d386a3`
   —— 样式源库为 `122691166044911`；e2e 用官方稿、守卫用复制稿，二者不要混
+- **自建 GRID/STROKE_WIDTH 样本**（公开，`test:styles` 的 `grid_stroke` 样本）`205234583944753` / fileKey `bb3da168-0864-4eac-a22c-76f65f8e5772`
+  —— 2026-09-22 用编辑器 UI 现造：5 个 GRID 样式（GRID/8、GRID/12、GRID/COL、GRID/COL2、GRID/ALIGN）+ 2 个描边宽度样式（SW/1、SW/2）。
+  文件只有 KB 级，故 `test:styles` 对该样本走 `tokenOnly` 分支（跳过 paint/text/effect/vars）并放宽快照体积阈值。
+  要再造同类样本：见上文 B 节「配套三招」。
 
 **`/data` 接口三个反直觉特性**
 1. **不可字节复现**：同一未变动文件连续下载 md5 不同 → 回归按结构比对，别用 md5 / 整文件 diff
