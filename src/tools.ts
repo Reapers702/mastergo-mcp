@@ -236,7 +236,9 @@ export function buildTools(): ToolDef[] {
         "支持 MasterGo 的两套 ukey 编码：新编码只存 `+<selfId>`（无 fileId 前缀），旧编码存 `<fileId>+<selfId>`。" +
         "实测（2026-09）：移动端界面设计（新编码）38/38 条 id/name/ukey 与浏览器 getLocalPaintStyles() " +
         "真值一致、SOLID 颜色逐值相同；火车票（旧编码）4 条本文件样式 + 86 条库引用。" +
-        "渐变样式（GRADIENT_LINEAR/RADIAL）目前只标记 kind，渐变 stops 多色解码暂未实现，color 为 null；" +
+        "渐变样式（GRADIENT_LINEAR/RADIAL）在本工具里 `paints[].kind='GRADIENT'`、`color` 为 null" +
+        "（渐变没有内联纯色）。**渐变的具体 stops/手柄请看 get_page_tree**：节点 fill 命中渐变时，" +
+        "`geometry.fills` 会直接给出 `type`/`gradientStops`/`gradientHandlePositions`（2026-09 已解码）。" +
         "collectionId 默认 'M:1'、collectionName 默认 '集合'（真值 getCollections() 证实 M:1 即本文件的" +
         "默认变量集合，而非客户端凭空构造）。" +
         "参数 file 传文件 ID 或完整 URL。",
@@ -299,13 +301,15 @@ export function buildTools(): ToolDef[] {
         "返回该文件 `/data` 里出现的**全部**效果样式，用 `sourceFileId`/`isExternal` 标注来源（详见 list_styles 的说明）。" +
         "通过浏览器 Cookie 全量下载 /data/{fileKey} 私有二进制，扫描样式索引表中 `05 02` 记录" +
         "（`05 <n>` 是类型判别式：1=颜色 / 2=效果 / 3=文字），再从「效果定义表」取具体数值。" +
-        "效果定义表条目格式：`01 <effectId> 02 <refId> 03 61 <c> 00 04 00 05 <n> 08 <alpha><R><G><B> " +
-        "[09 <radius>] [0b <offsetY>] 0e 01 00`（0 值用单字节 `00`，非 0 用 4 字节紧凑浮点）。" +
-        "实测（2026-09 移动端界面设计）：6/6 条 id/name 与浏览器 getLocalEffectStyles() 一致；" +
-        "color（含 alpha）全部一致；radius / offsetY 在有该字段时全部一致。" +
-        "⚠️ 已知局限：`09`/`0b` 会**整字段缺省**，且缺省不等于 0（实测有 offsetY=4 却无 `0b` 的条目），" +
-        "缺省规律在现有 6 个样式上无法确定，故按「宁可判空也不猜错」输出 null。" +
-        "offsetX / spread / type（DROP_SHADOW 等）尚未取样到非默认值，暂不输出。" +
+        "效果定义表条目格式：`01 <effectId> 02 <refId> 03 61 <c> 00 04 00 05 <n> " +
+        "08 <alpha><R><G><B> [09 <radius>] [0a <offsetX>] [0b <offsetY>] [0d <type>] [0e <2B>] [0f <spread>]`" +
+        "（0 值用单字节 `00`，非 0 用 4 字节紧凑浮点）。" +
+        "实测（2026-09 antd5）：34 样式 / 90 个效果项的 color/radius/offsetX/offsetY/type/spread " +
+        "**全字段与浏览器 getLocalEffectStyles() 真值逐项一致（含顺序）**；移动端界面设计 6/6 条 id/name 一致。" +
+        "⚠️ 同一款式的多个效果项在二进制里分散存放且字节序与 API 不一致，输出前已按 effectId 数字后缀降序排序。" +
+        "⚠️ 字段缺省规律：legacy 旧编码下 `09`/`0b` 会整字段缺省且缺省≠0（此时输出 null）；" +
+        "modern 编码实测无缺省反例。type 目前仅取样到 `0d`=1 即 DROP_SHADOW，" +
+        "INNER_SHADOW / LAYER_BLUR / BACKGROUND_BLUR 的字节值未取样，遇到时 type 为 null。" +
         "参数 file 传文件 ID 或完整 URL。",
       params: {
         file: z.string().describe("MasterGo 文件 ID 或完整文件 URL（必填）"),

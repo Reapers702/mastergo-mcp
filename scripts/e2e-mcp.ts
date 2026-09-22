@@ -12,12 +12,43 @@
  */
 
 import { spawn } from "node:child_process";
+import { readdirSync, statSync, existsSync } from "node:fs";
 import readline from "node:readline";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const BUNDLE = path.join(__dirname, "..", "dist", "index.cjs");
+const ROOT = path.join(__dirname, "..");
+const BUNDLE = path.join(ROOT, "dist", "index.cjs");
+
+/**
+ * 产物新鲜度防护：e2e spawn 的是 dist/index.cjs，而 dist/ 已 gitignore。
+ * 本地若忘记 build:bundle，e2e 会拿**旧代码**跑，报出令人误判为「解码坏了」的失败
+ *（实测踩过：bundle 停在 09-21、源码已到 09-22，list_styles 返回 0 条）。
+ * 这里在启动前比对 mtime，过期就直接提示重建，而不是让人去查逆向逻辑。
+ */
+function assertBundleFresh(): void {
+  if (!existsSync(BUNDLE)) {
+    console.error(`[e2e] ❌ 找不到 ${BUNDLE}，请先运行：npm run build:bundle`);
+    process.exit(1);
+  }
+  const bundleTime = statSync(BUNDLE).mtimeMs;
+  const srcDir = path.join(ROOT, "src");
+  const stale = readdirSync(srcDir)
+    .filter((f) => f.endsWith(".ts"))
+    .map((f) => ({ f, t: statSync(path.join(srcDir, f)).mtimeMs }))
+    .filter((s) => s.t > bundleTime);
+  if (stale.length > 0) {
+    console.error(
+      `[e2e] ❌ dist/index.cjs 比 ${stale.length} 个源文件旧（如 ${stale
+        .slice(0, 3)
+        .map((s) => s.f)
+        .join(", ")}）—— e2e 会拿旧产物跑出假失败。\n` +
+        `      请先运行：npm run build:bundle`
+    );
+    process.exit(1);
+  }
+}
 
 const FILE_ID = "205140012617682"; // Ant Design 5.0（公开，modern 格式，74 页）
 const FILE_KEY = "010e341a-0eae-49c9-a538-87932df0307d";
@@ -103,6 +134,7 @@ function callResult(msg: any): any {
 }
 
 async function main(): Promise<void> {
+  assertBundleFresh();
   const c = new McpStdioClient();
   await c.ready;
 

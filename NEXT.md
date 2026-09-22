@@ -138,7 +138,7 @@
 - `npm run test:styles`（**modern 守卫，已进 CI**）：双样本 fail-closed ——
   `antd_modern`（公开 `204971164239455`，真值 `test/fixtures/truth_antd_modern.json` 已入库，缺快照自动匿名下载 `/data` 并缓存）
   + `mobile_kit`（私有 `107389953208823`，真值 `truth_mobile_kit.json` 已入库，需 `.cache/mg_mobile_kit.bin` 私有快照，缺失只跳过它自己）。
-  基线 paint 294 / text 61 / effect 43 / vars 414，并对 SOLID 颜色、文字 fontSize/lineHeight/字体/字间距、
+  基线（**下限**）paint 290 / text 29 / effect 34 / vars 365（= 真值条数，防漏读），并对 SOLID 颜色、文字 fontSize/lineHeight/字体/字间距、
   效果 alpha/radius/offsetY、变量 type 与数值型 `floatData` **逐值断言**。
 - **为什么两套都要**：legacy 与 modern 是**两套 ukey 编码 + 两类样式短码锚点**，只测一个极易改坏另一个 ——
   `list_styles` 漏检 bug 与「modern 文字样式整表读不出」都是「一侧全绿、另一侧归零」。
@@ -225,7 +225,9 @@
 - `scripts/verify-styles-truth.ts` 改成**双样本、fail-closed**：
   `antd_modern`（公开，**自动匿名下载** `/data` + 落缓存，CI 必跑）+ `mobile_kit`（私有，缺快照只跳过它自己）。
   **一个样本都没真跑起来就 `exit 1`** —— 静默跳过等于失效。
-- 记录数基线：paint 294 / text 61 / effect 43 / vars 414（均 ≥ 真值条数，多出来的是二进制里带着的**其他库**样式，按全量返回并标注来源）。
+- 记录数**下限**基线：paint 290 / text 29 / effect 34 / vars 365（= 真值条数）。多出来的是二进制里带着的**其他库**样式，按全量返回并标注来源。
+  ⚠️ **2026-09-22 修正**：原先钉死精确值（294/61/43/414），但该类库样式**随源库增减而变** —— 实测远端源库变化后 paint 294→291、vars 414→411，
+  真值仍 290/290 全覆盖却判红。现改为「下限 + 真值逐条覆盖」，并已验证注入值级故障仍能判红。
 - CI 新增 `test:styles` 步骤，`actions/cache` key 升为 `mg-bin-v2`；同时修掉一个**既有 CI bug**：
   cache 步骤原先排在 `test:regress` **之后**，等于从来没命中过缓存。
 

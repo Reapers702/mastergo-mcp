@@ -1170,13 +1170,15 @@ export function parsePageTree(buf: Buffer, pageId: string): PageTree {
  *   - id / name / ukey 与真值完全一致（4/4 命中）
  *   - SOLID 样式的 RGBA 颜色经 paint 定义表（buildPaintTable）查询 refId=selfId 获取，
  *     与浏览器 API 真值一致
- *   - 渐变样式（GRADIENT_LINEAR/RADIAL）暂只标记 kind，color 为 null
- *     （渐变 stops 多色解码暂未实现，留待后续）
+ *   - 渐变样式（GRADIENT_LINEAR/RADIAL）的 stops / gradientHandlePositions 已解码
+ *     （2026-09，见 buildGradientTable / parseGradientAt）；受编码限制 LINEAR 只显式存一个手柄，
+ *     gradientHandlePositions 可能仅 1 项（第二个由轴默认推导，未编码）。
  *
- * collectionId 默认 "M:1"、collectionName 默认 "集合"：实测本文件 4 个本地 paint 样式
- * 全部归属同一 collection（"M:1" / "集合"），但二进制中**没有独立 collection 表**存储
- * 这两字段（搜 "115278536821990+M:" 0 命中），疑似 MasterGo 客户端对每个文件默认构造
- * 一个 collection。本实现先按约定硬编码，若未来发现多 collection 文件需调整。
+ * collectionId 默认 "M:1"、collectionName 默认 "集合"：真值 getCollections() 返回
+ * `[{id:"M:1", name:"集合", modes:[{id:"M:2", name:"模式 1"}]}]`，证明 **M:1 / M:2 是真实 id**，
+ * 而非客户端凭空构造（旧注释「二进制无独立 collection 表、疑似默认构造」的推测已被推翻；
+ * 实测火车票等文件确无独立表，但 id 本身来自服务端）。本实现按约定硬编码，
+ * 若未来发现多 collection 文件需调整。
  */
 export interface PaintStyle {
   /** 样式 id（selfId，形如 "5481:060533"） */

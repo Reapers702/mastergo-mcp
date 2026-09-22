@@ -73,8 +73,14 @@ interface Sample {
   envVar: string;
   /** false = 私有样本，缺快照时跳过（但整体至少要跑成一个样本） */
   public: boolean;
-  /** 当前解码基线（记录数，含库引用/复制带入的全部样式） */
-  expect: { paint: number; text: number; effect: number; vars: number };
+  /**
+   * 记录数下限（含库引用/复制带入的全部样式）。
+   * ⚠️ **不要改回精确相等**：多出来的记录是二进制里带的其他库样式，随源库增减而变，
+   * 与解码正确性无关 —— 2026-09-22 实测远端源库变化，paint 294→291、vars 414→411，
+   * 真值仍 290/290 全覆盖却判红。解码是否退化由「真值逐条覆盖」断言负责，
+   * 这里只保证「没漏读」的下限。
+   */
+  minRecords: { paint: number; text: number; effect: number; vars: number };
 }
 
 const SAMPLES: Sample[] = [
@@ -87,10 +93,8 @@ const SAMPLES: Sample[] = [
     defaultSnapshot: ".cache/antd_sample.bin",
     envVar: "MG_STYLE_SRC_ANTD",
     public: true,
-    // paint 294 / text 61 / effect 43 = 索引记录数，均 ≥ 真值条数：
-    // 二进制还带着客户端未列出的其他库样式（如 SF Pro 文字样式 27 条），按全量返回并标注来源
-    // vars 414 = 398（上述三类）+ 16 条数值型变量（CORNER_RADIUS 9 + NUMBER 7，`05 06`）
-    expect: { paint: 294, text: 61, effect: 43, vars: 414 },
+    // 下限取「真值条数」：解码至少要把真值全部读出来；上限不设，多的允许（其他库样式）。
+    minRecords: { paint: 290, text: 29, effect: 34, vars: 365 },
   },
   {
     key: "mobile_kit",
@@ -100,7 +104,7 @@ const SAMPLES: Sample[] = [
     defaultSnapshot: ".cache/mg_mobile_kit.bin",
     envVar: "MG_STYLE_SRC",
     public: false,
-    expect: { paint: 38, text: 13, effect: 6, vars: 57 },
+    minRecords: { paint: 38, text: 13, effect: 6, vars: 57 },
   },
 ];
 
@@ -205,13 +209,13 @@ function checkSample(s: Sample, truth: Truth, buf: Buffer): number {
     `  记录数 paint ${paint.length} / text ${text.length} / effect ${effect.length} / vars ${vars.length}` +
       `（真值 ${truth.paintStyles.length}/${truth.textStyles.length}/${truth.effectStyles.length}/${truth.variables.length}）`
   );
-  for (const [k, got, want] of [
-    ["paint", paint.length, s.expect.paint],
-    ["text", text.length, s.expect.text],
-    ["effect", effect.length, s.expect.effect],
-    ["vars", vars.length, s.expect.vars],
+  for (const [k, got, min] of [
+    ["paint", paint.length, s.minRecords.paint],
+    ["text", text.length, s.minRecords.text],
+    ["effect", effect.length, s.minRecords.effect],
+    ["vars", vars.length, s.minRecords.vars],
   ] as const) {
-    if (got !== want) bad(`${k} 记录数 ${got} ≠ 基线 ${want}`);
+    if (got < min) bad(`${k} 记录数 ${got} < 下限 ${min}（疑似漏读或解码退化）`);
   }
 
   // sourceFileId / isExternal 必须与 ukey 前缀自洽
@@ -223,6 +227,7 @@ function checkSample(s: Sample, truth: Truth, buf: Buffer): number {
   // ---- 颜色样式 ----
   {
     const bySelf = new Map(paint.map((g) => [selfId(g.ukey), g]));
+    const failBefore = fail;
     for (const w of truth.paintStyles) {
       const g = bySelf.get(w.id);
       if (!g) {
@@ -240,12 +245,14 @@ function checkSample(s: Sample, truth: Truth, buf: Buffer): number {
       }
     }
     const solid = truth.paintStyles.filter((w) => w.paints[0]?.type === "SOLID").length;
-    console.log(`  ✅ 颜色：真值 ${truth.paintStyles.length} 条全覆盖（其中 SOLID 逐值 ${solid}）`);
+    const icon = fail === failBefore ? "✅" : "❌";
+    console.log(`  ${icon} 颜色：真值 ${truth.paintStyles.length} 条全覆盖（其中 SOLID 逐值 ${solid}）`);
   }
 
   // ---- 文字样式 ----
   {
     const bySelf = new Map(text.map((g) => [selfId(g.ukey), g]));
+    const failBefore = fail;
     let ls = 0;
     for (const w of truth.textStyles) {
       const g = bySelf.get(w.id);
@@ -286,12 +293,13 @@ function checkSample(s: Sample, truth: Truth, buf: Buffer): number {
         bad(`文字 ${w.id} 字间距 ${g.letterSpacing.value} ≠ ${w.letterSpacing}`);
       } else ls++;
     }
-    console.log(`  ✅ 文字：真值 ${truth.textStyles.length} 条全覆盖（显式字间距 ${ls} 条）`);
+    console.log(`  ${fail === failBefore ? "✅" : "❌"} 文字：真值 ${truth.textStyles.length} 条全覆盖（显式字间距 ${ls} 条）`);
   }
 
   // ---- 效果样式 ----
   {
     const bySelf = new Map(effect.map((g) => [selfId(g.ukey), g]));
+    const failBefore = fail;
     let items = 0;
     let nulls = 0;
     for (const w of truth.effectStyles) {
@@ -314,12 +322,13 @@ function checkSample(s: Sample, truth: Truth, buf: Buffer): number {
         else if (!near(ge.offsetY, we.offset.y)) bad(`效果 ${w.id}[${i}] offsetY ${ge.offsetY} ≠ ${we.offset.y}`);
       }
     }
-    console.log(`  ✅ 效果：真值 ${truth.effectStyles.length} 条全覆盖（效果项 ${items}，${nulls} 个字段因二进制缺省为 null）`);
+    console.log(`  ${fail === failBefore ? "✅" : "❌"} 效果：真值 ${truth.effectStyles.length} 条全覆盖（效果项 ${items}，${nulls} 个字段因二进制缺省为 null）`);
   }
 
   // ---- 变量 ----
   {
     const bySelf = new Map(vars.map((g) => [selfId(g.ukey), g]));
+    const failBefore = fail;
     // 数值型变量（圆角/纯数字）：真值带 floatData 时逐元素对照，并要求解码非 null
     let numericChecked = 0;
     for (const w of truth.variables) {
@@ -348,7 +357,7 @@ function checkSample(s: Sample, truth: Truth, buf: Buffer): number {
     }
     const numeric = vars.filter((g) => g.type === "CORNER_RADIUS" || g.type === "NUMBER").length;
     console.log(
-      `  ✅ 变量：真值 ${truth.variables.length} 条全覆盖` +
+      `  ${fail === failBefore ? "✅" : "❌"} 变量：真值 ${truth.variables.length} 条全覆盖` +
         `（数值型 CORNER_RADIUS/NUMBER 记录 ${numeric} 条，其中 ${numericChecked} 条与浏览器 floatData 逐值对照）`
     );
   }

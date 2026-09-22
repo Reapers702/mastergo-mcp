@@ -119,7 +119,8 @@ node dist/index.cjs --cookie "gfsessionid=..." --url https://mastergo.com
 > 对部分公开文件还会 403），无法离线获取，故复制稿的样式会被标成 `isExternal=true`。
 > 需要「只要本文件自建」时按 `sourceFileId === fileId` 过滤即可。
 >
-> 实测总数（含库引用）：antd5 副本 `204971164239455` → paint 294 / text 61 / effect 43 / 变量 414；
+> 实测总数（含库引用）：antd5 副本 `204971164239455` → paint 291 / text 61 / effect 43 / 变量 411
+> （2026-09-22 复测数；源库会变动，此类"多出来的库样式"数量**不作为断言**，详见「回归测试」）；
 > 火车票（legacy）→ paint 4 本地 + 86 库引用、文字 0 本地 + 10 库引用（`test:regress` 已把两个数都写进基线；
 > 文字从 4 涨到 10 是本轮放宽 TEXT 锚点 + 解出「0 值单字节」紧凑编码的真实回收，详见「回归测试」）。
 
@@ -147,11 +148,14 @@ legacy 与 modern 是**两套 ukey 编码 + 两类样式序号短码**，只测�
 
 | 样本 | 可见性 | fileId | 编码特征 | 基线（记录数 / 真值条数） |
 | --- | --- | --- | --- | --- |
-| `antd_modern` | **公开**，CI 必跑 | `204971164239455`（antd5 副本） | 旧 ukey `<fileId>+<id>`、样式全部来自源库 `122691166044911`；TEXT 短码非 `a` 开头 | paint 294/290、text 61/29、effect 43/34、变量 414/365 |
+| `antd_modern` | **公开**，CI 必跑 | `204971164239455`（antd5 副本） | 旧 ukey `<fileId>+<id>`、样式全部来自源库 `122691166044911`；TEXT 短码非 `a` 开头 | paint ≥290、text ≥29、effect ≥34、变量 ≥365（下限=真值条数） |
 | `mobile_kit` | 私有，缺快照只跳过自己 | `107389953208823` | **新 ukey `+<id>`**（无前缀） | paint 38、text 13、effect 6、变量 57 |
 
 - **真值入库**：`test/fixtures/truth_antd_modern.json`（浏览器 `window.mg` 导出，含 12 条数值型变量的 `floatData`）。
-- **断言到值**：SOLID 颜色 RGBA、文字 fontSize/lineHeight/PostScript/字间距、效果 alpha/radius/offsetY、变量 type 与数值型 `floatData` 逐值对照；记录数按上表钉死基线，防漏读也防多读。
+- **断言到值**：SOLID 颜色 RGBA、文字 fontSize/lineHeight/PostScript/字间距、效果 alpha/radius/offsetY、变量 type 与数值型 `floatData` 逐值对照。
+- **记录数只设下限，不钉死精确值（2026-09-22 修正）**：多出来的记录是二进制里带的其他库样式，**随源库增减而变、与解码正确性无关**。
+  实测远端源库变化后 paint 294→291、vars 414→411（真值仍 290/290 全覆盖），精确相等会误报红灯。
+  现在下限 = 真值条数（防漏读），**解码是否退化由「真值逐条覆盖 + 值级对照」负责** —— 已注入故障验证：值改错 / 整表读不出均能判红。
 - **⚠️ 静默跳过即失效**：只要**一个样本都没真正跑起来**就 `exit 1`（曾出现「私有快照 403 得到 36 字节错误体被当成快照 → 解出 0 条 → 全绿」的假通过，现已加最小体积校验）。
 - **本地快照**：`MG_STYLE_SRC_ANTD` / `MG_STYLE_SRC` 可分别指向两份 `/data` 快照跳过下载；私有样本获取方式见脚本头部注释。
 
