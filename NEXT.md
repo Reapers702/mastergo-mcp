@@ -4,11 +4,14 @@
 
 ## 现状一句话
 
-**10 个工具**可用：`get_file_meta` / `list_pages` / `get_file_nodes` / `get_page_tree` / `list_styles` / `list_text_styles` / `list_effect_styles` / `list_variables` / `list_components` / `diff_files`。
+**11 个工具**可用：`get_file_meta` / `list_pages` / `get_file_nodes` / `get_page_tree` / `list_styles` / `list_text_styles` / `list_effect_styles` / `list_variables` / `list_token_styles` / `list_components` / `diff_files`。
 
 - 节点树：legacy 828/828（0 错判）、modern 命中 8.3%（容器仍返回 `null`）
 - **样式与变量：已全面打通**，与浏览器真值逐条一致 —— 颜色 38/38、文字 13/13、效果 **34/34（antd5，90/90 项含全字段）**、变量 57/57；
   数值型变量（CORNER_RADIUS/NUMBER）也已解出 `floatData`，antd5 **12/12 逐值一致**
+- **样式族：已打通（2026-09-22）**，`list_token_styles` 交付 —— SPACING **7/7**、CORNER_RADIUS **5/5** 与
+  `getLocalSpacingStyles()` / `getLocalCornerRadiusStyles()` 真值逐条一致；族判别式取自**客户端自身枚举**
+  （`05 <n>`：1=PAINT/2=EFFECT/3=TEXT/4=GRID/5=STROKE/6=CUSTOM；CUSTOM 子块 `01 <sub>`：1=Spacing/2=Padding/3=Radius/4=CrossSpacing）
 - **守卫：legacy（`test:regress`）+ modern（`test:styles`）双套都在 CI 里**，modern 侧公开样本自动匿名下载，缺快照不再静默跳过而是判失败
 - **组件：已打通（2026-09-20）**，`list_components` 交付，火车票 96/96 与真值一致
 
@@ -17,7 +20,6 @@
 ## 🔑 2026-09-20 的关键突破（先读这段）
 
 ### 0. 真值导出链路已打通 —— 旧文档说的「做不了」已不成立
-
 旧版本文档（及本文件上一版）反复强调一条阻塞：
 
 > `browser-skill` **不支持任意页面 JS 求值**，因此 `window.mg` 真值导出做不了
@@ -256,9 +258,55 @@
 | --- | --- | --- |
 | **效果 `type` 补全**（INNER_SHADOW / LAYER_BLUR / BACKGROUND_BLUR 的 `0d` 值） | `scanEffectTable` | 需一个含内阴影/模糊样式的文件导真值；antd5 只有 DROP_SHADOW |
 | **`textCase` / `decoration`** | `parseTextStyleBody` 的 `06`/`0b` | 需取样到非默认值。`createTextStyle` 会忽略这两个参数，只能**在编辑器 UI 里改**再建样式 —— 自动化控件命中不稳，是本项唯一阻塞 |
-| **GRID / PADDING / SPACING / STROKE_WIDTH 等样式族** | `window.mg` 有 `getLocalGridStyles` / `getLocalPaddingStyles` / `getLocalSpacingStyles` / `getLocalStrokeWidthStyles` | 大概率**不是新表**：数值族样式很可能就是 `05 <n>` 的其它取值（`05 06` 已被证实是数值型）。做法：导一次真值 → 看 `05 <n>` 与子块布局，`parseNumericStyleBody` 可直接复用 |
+| ~~**GRID / PADDING / SPACING / STROKE_WIDTH 等样式族**~~ | ✅ **已完成 2026-09-22**，见下 | — |
 | **多模式变量**（`modes` 不止 `M:2`） | `list_variables` | 需一个建了多模式的文件；现在只解首模式值 |
 | **modern 节点树容器类型**（FRAME/COMPONENT_SET 仍 `null`） | `decodeModernContainer` | 见 P3，两轮 n-gram 搜索无判别式，属硬骨头 |
+
+---
+
+## 🔑 2026-09-22 的关键突破：样式族 + 一个真 P0
+
+### A. 样式族（SPACING/PADDING/CORNER_RADIUS/STROKE_WIDTH/GRID）已交付
+
+`list_token_styles` 上线，等于离线实现浏览器那五个 `getLocalXxxStyles()`。
+
+**族判别式不是猜的，是从客户端 JS 里挖出来的枚举**（编辑器 bundle 的 `StyleToCppStyle`）：
+
+```
+样式类型（= 样式索引的 `05 <n>`）：PAINT=1, EFFECT=2, TEXT=3, GRID=4, STROKE=5, CUSTOM=6
+CUSTOM 子类型（= 子块 `01 <sub>`）：NONE=0, Spacing=1, Padding=2, Radius=3, CrossSpacing=4
+```
+
+这套值与我们**既有的实测**（1/2/3/6 + sub 1/3）完全吻合，故可信。
+实测对照：SPACING **7/7**、CORNER_RADIUS **5/5**（真值 `test/fixtures/truth_numeric_families.json`，已进 `test:styles`）。
+
+**重要认知：SPACING 与 NUMBER 是同一批对象** —— 二进制里完全同构（都是 `CUSTOM+Spacing`），
+客户端里两者映射到同一个 CppStyle，只是变量 API 叫 NUMBER、样式 API 叫 SPACING。
+（再次印证「变量 = 样式」。）
+
+**未完成部分**：`GRID`/`STROKE_WIDTH` 在**全部 6 份样本里出现 0 次**，值子块布局未知，
+故只登记类型、`values` 恒 null。要补全需要一份**含网格样式 / 描边宽度样式**的文件导真值
+（公开的 antd5 官方稿与副本里这两个族都是 0）。
+
+### B. 真值导出的新姿势：**公开文件也能跑 `window.mg`**（省掉登录）
+
+不必登录、不必私有文件：`https://mastergo.com/file/<fileId>` 只要是**公开稿**，
+编辑器加载后 `window.mg` 就是完整的 99 键插件 API，`browser_execute` 可直接调
+`getLocalSpacingStyles()` 等。配合 `.cache/post_server.cjs` 落盘真值即可。
+本次即用此法拿到 `truth_numeric_families.json`。
+
+### C. ⚠️ P0 踩坑：`/data` 头部签名的版本字节会变
+
+modern 头部是 `09 <X> 01 04 02 00 03 <pageCount>`，**`<X>` 不是常量**：
+同一份 antd5 官方稿 09-21 下载是 `09 02`、09-22 下载是 `09 04`，同一副本两次下载又是 `09 16`。
+
+`page-index.ts` / `node-index.ts` 原先把整串写死成 `09 02 …`，于是**所有新下载的文件**都被判成
+legacy → `list_pages` **0 页**、`get_file_nodes` 从 144055 条掉到 **1 条**。
+现已改为只匹配后半段 `01 04 02 00 03`（签名固定在偏移 0，据此校验避免误命中），旧签名保留兜底。
+
+> **教训**：`/data` 既然「不可字节复现」，**任何跨下载的固定字节都不该当判据**。
+> 这个坑之所以能潜伏，是因为 CI 一直用 `actions/cache` 复用的**旧快照**（X=02）——
+> 快照缓存提高了速度，却也把格式漂移挡在了 CI 之外。
 
 ---
 

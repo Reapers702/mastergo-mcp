@@ -22,7 +22,8 @@
     "build:bundle": "node scripts/build.mjs",
     "prepare": "node scripts/build.mjs",
     "start": "node dist/index.cjs",
-    "dev": "tsx src/index.ts"
+    "dev": "tsx src/index.ts",
+    "test:fresh": "tsx scripts/check-fresh-download.ts"
   },
   "keywords": [],
   "author": "",

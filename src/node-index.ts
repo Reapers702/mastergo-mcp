@@ -22,7 +22,15 @@
 const NODE_MARKER = Buffer.from([0x09, 0x01, 0x00, 0x01]);
 const PAGE_PREFIX = Buffer.from([0x07, 0x01, 0x08, 0x00]);
 const MODERN_HEAD = Buffer.from([0x09, 0x02, 0x01, 0x04, 0x02, 0x00, 0x03]);
+/** modern 头部签名的后半段 `01 04 02 00 03`（`<X>` 可变，详见 parseNodeBlocks 注释）。 */
+const MODERN_HEAD_TAIL = Buffer.from([0x01, 0x04, 0x02, 0x00, 0x03]);
 const ID_RE = /^\d+:\d+(?:\/\d+:\d+)*$/;
+
+/** 判 modern 格式：优先按「文件起始处的 09 <X> 01 04 02 00 03」，兜底兼容旧签名。 */
+function isModernFormat(buf: Buffer): boolean {
+  if (buf.length > 8 && buf[0] === 0x09 && buf.subarray(2, 7).equals(MODERN_HEAD_TAIL)) return true;
+  return buf.indexOf(MODERN_HEAD) >= 0;
+}
 
 import { parsePageBlocks } from "./page-index.js";
 
@@ -126,8 +134,11 @@ export interface ParsedNodeBlocks {
 }
 
 export function parseNodeBlocks(buf: Buffer): ParsedNodeBlocks {
-  // modern 格式以文件头签名 `09 02 01 04 02 00 03 <count>` 判别（对 legacy 无此签名）。
-  if (buf.indexOf(MODERN_HEAD) >= 0) return parseModernNodeBlocks(buf);
+  // modern 格式以文件头签名判别（legacy 无此签名）。
+  // ⚠️ 签名是 `09 <X> 01 04 02 00 03 <count>`，其中 `<X>` **会变**（实测 02 / 04 / 16，
+  // 同一文件不同次下载也不同）。早期把整串写死成 `09 02 …`，导致新下载的文件被判成 legacy，
+  // 节点索引只解出 1 条（实测 antd5 新下载 totalNodes 从 144055 掉到 1）。故只匹配后半段。
+  if (isModernFormat(buf)) return parseModernNodeBlocks(buf);
 
   const pages = new Map<string, string>();
   const nodes = new Map<string, string>();

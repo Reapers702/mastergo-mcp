@@ -1271,12 +1271,52 @@ export function listLocalPaintStyles(buf: Buffer, fileId: string): PaintStyle[] 
  * 注意：记录里的 `03 61 <c>`（如 a0/a1/aL）**不是**类型判别式——同一类型的 c 各不相同
  * （Purple=aL、Yellow=a1、Success=aF 同为 PAINT），它只是一个序号，切勿据此判类型。
  */
-export type StyleKind = "PAINT" | "EFFECT" | "TEXT" | "CORNER_RADIUS" | "NUMBER";
+export type StyleKind =
+  | "PAINT"
+  | "EFFECT"
+  | "TEXT"
+  | "GRID"
+  | "STROKE_WIDTH"
+  | "CORNER_RADIUS"
+  | "SPACING"
+  | "PADDING"
+  | "NUMBER";
 
-const STYLE_KIND_BY_N: Record<number, StyleKind> = { 1: "PAINT", 2: "EFFECT", 3: "TEXT" };
+/**
+ * `05 <n>` → 样式族。取值来自 MasterGo 客户端自身的枚举（**不是猜的**）：
+ * 在编辑器 JS 里 `PAINT=1, EFFECT=2, TEXT=3, GRID=4, STROKE=5, CUSTOM=6`，
+ * 与我们**实测**的 1/2/3/6 完全吻合（`CUSTOM` 即数值型族）。
+ * 出处：客户端 bundle `StyleToCppStyle` / `cppStyleTypeToPluginStyleType`。
+ * ⚠️ GRID(4) / STROKE(5) 在现有全部样本里出现 0 次（无正样本可验），
+ * 其**值子块布局未知**，故只登记类型、不解值（见 listTokenStyles）。
+ */
+const STYLE_KIND_BY_N: Record<number, StyleKind> = {
+  1: "PAINT",
+  2: "EFFECT",
+  3: "TEXT",
+  4: "GRID",
+  5: "STROKE_WIDTH",
+};
 
-/** `05 06` = 数值型变量；CORNER_RADIUS 与 NUMBER 都编码为 6，需由子块 `01 <sub>` 二选一。 */
+/** `05 06` = CUSTOM（数值型族）；具体族由子块 `01 <sub>` 二选一/多选一。 */
 const NUMERIC_STYLE_N = 0x06;
+
+/**
+ * CUSTOM 的子类型 → 族。同样取自客户端枚举（`NONE=0, Spacing=1, Padding=2, Radius=3, CrossSpacing=4`），
+ * 且 `StyleToCppStyle` 明确写出：`PADDING={CUSTOM,Padding}`、`SPACING={CUSTOM,Spacing}`、
+ * `NUMBER={CUSTOM,Spacing}`、`CORNER_RADIUS={CUSTOM,Radius}`。
+ * 实测吻合：sub=1 → 浏览器 `getLocalSpacingStyles()`（7/7）、sub=3 → `getLocalCornerRadiusStyles()`（5/5）。
+ *
+ * ⚠️ **SPACING 与 NUMBER 在二进制里完全同构**（都是 CUSTOM+Spacing）：变量 API 叫 NUMBER、
+ * 样式 API 叫 SPACING，是同一批对象的两个视图 —— 客户端源码里两者映射到同一个 CppStyle。
+ * 本模块沿用变量 API 的叫法（`listLocalVariables` 输出 NUMBER），样式族视图另见 listTokenStyles。
+ */
+const CUSTOM_SUB_KIND: Record<number, StyleKind> = {
+  1: "SPACING",
+  2: "PADDING",
+  3: "CORNER_RADIUS",
+  4: "NUMBER", // CrossSpacing：客户端枚举里的第 4 值，语义未取样验证，暂归入 NUMBER
+};
 
 /**
  * 一条样式索引记录。
@@ -1365,8 +1405,8 @@ function scanStyleIndex(buf: Buffer, fileId: string): StyleIndexRecord[] {
     // sub=3→四值圆角、sub=1→单值数字（值的布局见 parseNumericStyleBody）。
     let kind: StyleKind | undefined = STYLE_KIND_BY_N[n];
     if (n === NUMERIC_STYLE_N) {
-      const sub = buf[p05 + 3];
-      kind = sub === 3 ? "CORNER_RADIUS" : sub === 1 ? "NUMBER" : undefined;
+      // CUSTOM 族：判别式是子块首字段 `01 <sub>`（sub 映射见 CUSTOM_SUB_KIND）
+      kind = buf[p05 + 2] === 0x01 ? CUSTOM_SUB_KIND[buf[p05 + 3]] : undefined;
     }
     if (!kind) continue;
     // 非 `a` 锚点目前只对 TEXT 开放：其他类型没有可靠的子块判据，放开会引入假阳性
@@ -1811,13 +1851,17 @@ function parseNumericStyleBody(
   buf: Buffer,
   bodyPos: number,
   keyPos: number,
-): { type: "CORNER_RADIUS" | "NUMBER"; values: number[] } | null {
+): { type: StyleKind; sub: number; values: number[] } | null {
   if (buf[bodyPos] !== 0x01 || buf[bodyPos + 2] !== 0x02) return null;
   const sub = buf[bodyPos + 1];
-  const count = buf[bodyPos + 3];
-  const type = sub === 3 ? "CORNER_RADIUS" : sub === 1 ? "NUMBER" : null;
+  const type = CUSTOM_SUB_KIND[sub];
   if (!type) return null;
-  if (count !== (type === "CORNER_RADIUS" ? 4 : 1)) return null;
+  const count = buf[bodyPos + 3];
+  // 值个数按族固定：CORNER_RADIUS 四角、其余单值（实测 sub=1/3）。留出余量以容纳
+  // 尚未取样的 PADDING（可能是 四边/上下左右 等多值），但设上限避免把噪声读成大数组。
+  const expect = type === "CORNER_RADIUS" ? 4 : 1;
+  if (count !== expect && !(type === "PADDING" && count >= 1 && count <= 4)) return null;
+  if (count < 1 || count > 8) return null;
   let p = bodyPos + 4;
   const values: number[] = [];
   for (let k = 0; k < count; k++) {
@@ -1826,7 +1870,7 @@ function parseNumericStyleBody(
     p = f.next;
   }
   if (p > keyPos) return null;
-  return { type, values };
+  return { type, sub, values };
 }
 
 /**
@@ -1843,18 +1887,27 @@ export function listLocalVariables(buf: Buffer, fileId: string): VariableEntry[]
   const out: VariableEntry[] = [];
 
   for (const rec of scanStyleIndex(buf, fileId)) {
+    // 变量 API 只有 CORNER_RADIUS / NUMBER 两个数值类型（真值 varTypeDistribution 实测），
+    // 样式 API 的 SPACING / PADDING 在变量视图里统一叫 NUMBER（客户端源码里
+    // NUMBER 与 SPACING 映射到同一个 CppStyle = CUSTOM+Spacing，是同一批对象的两个视图）。
+    // GRID / STROKE_WIDTH 属样式族、不是变量类型，故本视图跳过。
+    let type: VariableEntry["type"];
+    if (rec.kind === "SPACING" || rec.kind === "PADDING" || rec.kind === "NUMBER") type = "NUMBER";
+    else if (rec.kind === "PAINT" || rec.kind === "EFFECT" || rec.kind === "TEXT" || rec.kind === "CORNER_RADIUS") type = rec.kind;
+    else continue;
+
     let color: NodeColor | null = null;
     let floatData: number[] | null = null;
     if (rec.kind === "PAINT") {
       const entry = paintMap.get(rec.id);
       color = entry ? entry.color : null;
-    } else if (rec.kind === "CORNER_RADIUS" || rec.kind === "NUMBER") {
+    } else if (rec.kind === "CORNER_RADIUS" || rec.kind === "NUMBER" || rec.kind === "SPACING" || rec.kind === "PADDING") {
       floatData = parseNumericStyleBody(buf, rec.bodyPos, rec.keyPos)?.values ?? null;
     }
     out.push({
       id: rec.id,
       name: rec.name,
-      type: rec.kind,
+      type,
       collectionId: "M:1",
       collectionName: "集合",
       ukey: rec.ukey,
@@ -1866,6 +1919,68 @@ export function listLocalVariables(buf: Buffer, fileId: string): VariableEntry[]
     });
   }
 
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// 样式族视图（SPACING / PADDING / CORNER_RADIUS / STROKE_WIDTH / GRID）
+// ---------------------------------------------------------------------------
+
+/** 一条「样式族」记录（对应浏览器 getLocalSpacingStyles / getLocalPaddingStyles 等）。 */
+export interface TokenStyleEntry {
+  id: string;
+  name: string;
+  /** 样式族，与浏览器 getLocalXxxStyles() 的 type 对齐 */
+  type: "SPACING" | "PADDING" | "CORNER_RADIUS" | "STROKE_WIDTH" | "GRID";
+  ukey: string;
+  sourceFileId: string;
+  isExternal: boolean;
+  description: string;
+  /**
+   * 数值型族的值。布局 `01 <sub> 02 <count> [<count> 个「紧凑浮点或 0」]`：
+   * SPACING 单值（如 `[8]`）、CORNER_RADIUS 四角（如 `[8,8,8,8]`）。
+   * GRID / STROKE_WIDTH 的值子块布局**未取样**，恒为 null（不猜）。
+   */
+  values: number[] | null;
+}
+
+/** 客户端枚举里的族名 → 本模块输出名（浏览器样式 API 的叫法）。 */
+const TOKEN_STYLE_KINDS: StyleKind[] = ["SPACING", "PADDING", "CORNER_RADIUS", "STROKE_WIDTH", "GRID"];
+
+/**
+ * 扫描该文件 `/data` 里出现的**全部**「样式族」记录（含团队库/复制带入，按 sourceFileId 标注来源）。
+ *
+ * 这是浏览器 `getLocalSpacingStyles()` / `getLocalPaddingStyles()` / `getLocalCornerRadiusStyles()` /
+ * `getLocalStrokeWidthStyles()` / `getLocalGridStyles()` 五个接口的统一离线实现。
+ *
+ * 族判别式与实测对照：
+ *   - `05 06` + 子块 `01 01` → SPACING（antd5 副本 `getLocalSpacingStyles()` **7/7** id/name/值一致）
+ *   - `05 06` + 子块 `01 02` → PADDING（**无正样本**，布局与 SPACING 同族）
+ *   - `05 06` + 子块 `01 03` → CORNER_RADIUS（`getLocalCornerRadiusStyles()` **5/5** 一致）
+ *   - `05 05` → STROKE_WIDTH、`05 04` → GRID（**全部样本出现 0 次**，值布局未知，values 恒 null）
+ *
+ * ⚠️ SPACING 与 NUMBER 在二进制里**完全同构**（都是 `CUSTOM+Spacing`）：变量 API 叫 NUMBER、
+ * 样式 API 叫 SPACING。本函数按**样式 API** 的叫法输出 SPACING；变量视图见 listLocalVariables。
+ */
+export function listTokenStyles(buf: Buffer, fileId: string): TokenStyleEntry[] {
+  const out: TokenStyleEntry[] = [];
+  for (const rec of scanStyleIndex(buf, fileId)) {
+    if (!TOKEN_STYLE_KINDS.includes(rec.kind)) continue;
+    const values =
+      rec.kind === "GRID" || rec.kind === "STROKE_WIDTH"
+        ? null
+        : parseNumericStyleBody(buf, rec.bodyPos, rec.keyPos)?.values ?? null;
+    out.push({
+      id: rec.id,
+      name: rec.name,
+      type: rec.kind as TokenStyleEntry["type"],
+      ukey: rec.ukey,
+      sourceFileId: rec.sourceFileId,
+      isExternal: rec.isExternal,
+      description: rec.description,
+      values,
+    });
+  }
   return out;
 }
 

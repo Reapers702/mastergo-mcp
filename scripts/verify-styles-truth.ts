@@ -22,12 +22,23 @@ import { readFileSync, existsSync, writeFileSync, mkdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import axios from "axios";
+import { parsePageBlocks } from "../src/page-index.ts";
 import {
   listLocalPaintStyles,
   listLocalTextStyles,
   listLocalEffectStyles,
   listLocalVariables,
+  listTokenStyles,
 } from "../src/node-tree.ts";
+
+/** 真值里的族键（浏览器 getLocalXxxStyles 去掉前缀）→ 本实现的 type 名。 */
+const FAM_TO_API_TYPE: Record<string, string> = {
+  spacing: "SPACING",
+  padding: "PADDING",
+  cornerRadius: "CORNER_RADIUS",
+  strokeWidth: "STROKE_WIDTH",
+  grid: "GRID",
+};
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, "..");
@@ -81,6 +92,8 @@ interface Sample {
    * 这里只保证「没漏读」的下限。
    */
   minRecords: { paint: number; text: number; effect: number; vars: number };
+  /** 可选的「样式族」真值（getLocalSpacingStyles / getLocalPaddingStyles / … 的导出） */
+  tokenTruthPath?: string;
 }
 
 const SAMPLES: Sample[] = [
@@ -95,6 +108,7 @@ const SAMPLES: Sample[] = [
     public: true,
     // 下限取「真值条数」：解码至少要把真值全部读出来；上限不设，多的允许（其他库样式）。
     minRecords: { paint: 290, text: 29, effect: 34, vars: 365 },
+    tokenTruthPath: "test/fixtures/truth_numeric_families.json",
   },
   {
     key: "mobile_kit",
@@ -151,7 +165,73 @@ for (const s of SAMPLES) {
     continue;
   }
   ranSamples++;
+  // 先断言「页面索引解出来了」：2026-09-22 的 P0（头部签名版本字节变化）会让解码整体
+  // 静默退化成 0 条，此时后面那些「真值全覆盖」断言会变成对空集的平凡通过 —— 必须前置拦截。
+  if (parsePageBlocks(buf).length === 0) {
+    console.error("  ❌ 页面索引解析为 0 页（疑似 /data 头部签名漂移，见 README 注意事项）");
+    totalFail++;
+    continue;
+  }
   totalFail += checkSample(s, JSON.parse(readFileSync(truthFile, "utf8")) as Truth, buf);
+  // 样式族视图（SPACING/PADDING/CORNER_RADIUS/STROKE_WIDTH/GRID）另有一份真值，可选
+  if (s.tokenTruthPath) {
+    const tf = path.join(ROOT, s.tokenTruthPath);
+    if (!existsSync(tf)) {
+      console.error(`  ❌ 缺少样式族真值 ${s.tokenTruthPath}`);
+      totalFail++;
+    } else {
+      totalFail += checkTokenStyles(s, JSON.parse(readFileSync(tf, "utf8")), buf);
+    }
+  }
+}
+
+/** 样式族真值（浏览器 getLocalSpacingStyles / getLocalPaddingStyles / … 导出）。 */
+interface TokenTruth {
+  counts: Record<string, number>;
+  families: Record<string, Array<{ id: string; name: string; type: string; ukey: string; isExternal: boolean; value: Record<string, number[]> }>>;
+}
+
+/**
+ * 校验样式族视图：逐族比对**每条 id/name/值**，并要求解码条数 ≥ 真值条数。
+ *
+ * ⚠️ **不能按 isExternal 过滤来取「本文件」**：从团队库复制/另存出的文件（如 antd5 副本）
+ * 二进制整批保留源库 ukey，这些记录全是 isExternal=true，而客户端把它们算作本文件样式。
+ * 故这里直接用真值 id（selfId）配对，条数只设下限（多出来的是其他库样式，允许）。
+ */
+function checkTokenStyles(s: Sample, truth: TokenTruth, buf: Buffer): number {
+  let fail = 0;
+  const bad = (m: string) => { console.log("  ❌ " + m); fail++; };
+  const all = listTokenStyles(buf, s.fileId) as unknown as Array<{
+    id: string; name: string; type: string; ukey: string; sourceFileId: string; isExternal: boolean; values: number[] | null;
+  }>;
+  const gotCounts: Record<string, number> = {};
+  for (const r of all) gotCounts[r.type] = (gotCounts[r.type] ?? 0) + 1;
+  const bySelf = new Map(all.map((r) => [selfId(r.ukey), r]));
+  let checked = 0;
+  const famParts: string[] = [];
+  for (const fam of Object.keys(truth.counts)) {
+    const want = truth.counts[fam];
+    const apiType = FAM_TO_API_TYPE[fam];
+    if (!apiType) { bad(`样式族真值出现未知族 ${fam}`); continue; }
+    const got = gotCounts[apiType] ?? 0;
+    if (got < want) bad(`${apiType} 条数 ${got} < 真值 ${want}（疑似漏读）`);
+    famParts.push(`${apiType} ${got}/${want}`);
+    for (const w of truth.families[fam] ?? []) {
+      const g = bySelf.get(w.id);
+      if (!g) { bad(`${apiType} 漏掉 ${w.id} ${w.name}`); continue; }
+      if (g.name !== w.name) bad(`${apiType} ${w.id} name ${JSON.stringify(g.name)} ≠ ${JSON.stringify(w.name)}`);
+      if (g.type !== apiType) { bad(`${apiType} ${w.id} 类型 ${g.type} ≠ ${apiType}`); continue; }
+      if (g.type === "GRID" || g.type === "STROKE_WIDTH") { checked++; continue; } // 值布局未取样，不比对
+      const key = Object.keys(w.value)[0];
+      const want2 = w.value[key];
+      const got2 = g.values;
+      if (!got2 || got2.length !== want2.length || !want2.every((v, i) => near(v, got2[i]))) {
+        bad(`${apiType} ${w.id} ${w.name} 值 ${JSON.stringify(got2)} ≠ 真值 ${JSON.stringify(want2)}`);
+      } else checked++;
+    }
+  }
+  console.log(`  ${fail === 0 ? "✅" : "❌"} 样式族（记录数/真值）：${famParts.join("、")}；逐条核对 ${checked} 条`);
+  return fail;
 }
 
 async function loadBinary(s: Sample, snapshot: string): Promise<Buffer> {

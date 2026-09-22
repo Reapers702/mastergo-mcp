@@ -62,6 +62,7 @@ const ALL_TOOLS = [
   "list_text_styles",
   "list_effect_styles",
   "list_variables",
+  "list_token_styles",
   "list_components",
   "diff_files",
 ];
@@ -161,9 +162,11 @@ async function main(): Promise<void> {
 
   // 4. list_pages（首次触发全量下载 ~106MB，后续 get_page_tree/diff_files 复用缓存）
   const pages = callResult(await c.send("tools/call", { name: "list_pages", arguments: { file: FILE_ID } }));
+  // 精确断言（不是 >0）：2026-09-22 踩过「头部签名版本字节变化导致页面数静默变 0」的 P0 坑，
+  // 宽松断言放它通过了。antd5 官方稿固定 74 页，漂移必须报错。
   check(
-    Array.isArray(pages.pages) && pages.pages.length >= 10,
-    `list_pages 返回 ${pages.pages?.length} 个页面（antd5 共 74 页）`
+    Array.isArray(pages.pages) && pages.pages.length === 74,
+    `list_pages 返回 ${pages.pages?.length} 个页面（antd5 应为 74）`
   );
   const [p1, p2] = pages.pages as Array<{ id: string; name: string }>;
 
@@ -187,8 +190,9 @@ async function main(): Promise<void> {
   check(Array.isArray(diff.changes), "diff_files changes 为数组");
 
   // 7. get_file_nodes（限量 5，验证全量索引入口）
+  // totalNodes 精确断言：同一 P0 坑会让它从 144055 掉到 1，">0" 挡不住。
   const nodes = callResult(await c.send("tools/call", { name: "get_file_nodes", arguments: { file: FILE_ID, limit: 5 } }));
-  check(typeof nodes.totalNodes === "number" && nodes.totalNodes > 0, `get_file_nodes totalNodes=${nodes.totalNodes}`);
+  check(nodes.totalNodes === 144055, `get_file_nodes totalNodes=${nodes.totalNodes}（antd5 应为 144055）`);
 
   // 8. list_styles（antd5 现代编码样式表：全部是团队库 ukey，2026-09 起按来源标注而非吞掉）
   const styles = callResult(await c.send("tools/call", { name: "list_styles", arguments: { file: FILE_ID } }));
@@ -199,6 +203,25 @@ async function main(): Promise<void> {
     "每条样式都带 sourceFileId 来源标注"
   );
   check(styles.styles?.some((s: any) => s.name && !/^[0-9]+:[0-9A-Za-z]+$/.test(s.name)), "样式名可正常读出（非 id）");
+
+  // 9. list_token_styles（样式族：antd5 官方稿真值 SPACING 7 / CORNER_RADIUS 5）
+  const tokens = callResult(await c.send("tools/call", { name: "list_token_styles", arguments: { file: FILE_ID } }));
+  check(Array.isArray(tokens.styles), `list_token_styles 返回 ${tokens.styles?.length} 条`);
+  const famCount = (f: string) => tokens.styles?.filter((s: any) => s.type === f).length ?? 0;
+  check(famCount("SPACING") >= 7, `SPACING 条数 ${famCount("SPACING")} 应 ≥ 7（真值 7）`);
+  check(famCount("CORNER_RADIUS") >= 5, `CORNER_RADIUS 条数 ${famCount("CORNER_RADIUS")} 应 ≥ 5（真值 5）`);
+  check(
+    tokens.styles?.filter((s: any) => s.type === "SPACING").every((s: any) => Array.isArray(s.values) && s.values.length === 1),
+    "SPACING 每条都解出单值"
+  );
+  check(
+    tokens.styles?.filter((s: any) => s.type === "CORNER_RADIUS").every((s: any) => Array.isArray(s.values) && s.values.length === 4),
+    "CORNER_RADIUS 每条都解出四角值"
+  );
+  const oneFam = callResult(
+    await c.send("tools/call", { name: "list_token_styles", arguments: { file: FILE_ID, family: "SPACING" } })
+  );
+  check(oneFam.styles?.every((s: any) => s.type === "SPACING"), `family=SPACING 过滤生效（${oneFam.styles?.length} 条）`);
 
   c.kill();
   console.log(failed === 0 ? "\nPASS: e2e 全链路验证通过" : `\nFAIL: ${failed} 项失败`);

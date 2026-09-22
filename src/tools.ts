@@ -11,13 +11,15 @@
  *   - list_text_styles：文件内文字样式（TEXT）
  *   - list_effect_styles：文件内效果样式（EFFECT，阴影/模糊）
  *   - list_variables：文件内变量（Design Tokens；实测与「样式」是同一批对象）
+ *   - list_token_styles：文件内样式族（SPACING/PADDING/CORNER_RADIUS/STROKE_WIDTH/GRID）
  *   - list_components：文件内组件（COMPONENT/COMPONENT_SET，无独立编码表，本质是带自引用 ukey 的容器节点）
  *   - diff_files：两份文件/页面的节点树差异对比（新增/删除/修改，修改带字段级明细）
  * 仍待加入：图片/切图导出（**暂不考虑**，待开发者后期指明再做，见 NEXT.md）。
  *
  * 样式与变量共用一张「样式索引表」，其类型判别式是记录内的 `05 <n>`：
- * n=1 → PAINT、n=2 → EFFECT、n=3 → TEXT、n=6 → 数值型（CORNER_RADIUS/NUMBER，
- * 二者再由子块 `01 <sub>` 二选一）。详见 node-tree.ts。
+ * n=1 → PAINT、n=2 → EFFECT、n=3 → TEXT、n=4 → GRID、n=5 → STROKE_WIDTH、
+ * n=6 → CUSTOM（数值族，再由子块 `01 <sub>` 细分：1=Spacing/2=Padding/3=Radius/4=CrossSpacing）。
+ * 这套取值取自 MasterGo 客户端自身的枚举，详见 node-tree.ts。
  */
 
 import { z } from "zod";
@@ -363,6 +365,55 @@ export function buildTools(): ToolDef[] {
           fileKey,
           totalVariables: variables.length,
           variables,
+        });
+      },
+    },
+
+    {
+      name: "list_token_styles",
+      description:
+        "列出 MasterGo 文件内的**样式族**：SPACING（间距）、PADDING（边距）、CORNER_RADIUS（圆角）、" +
+        "STROKE_WIDTH（描边宽度）、GRID（布局网格）—— 即浏览器 " +
+        "getLocalSpacingStyles / getLocalPaddingStyles / getLocalCornerRadiusStyles / " +
+        "getLocalStrokeWidthStyles / getLocalGridStyles 五个接口的统一离线实现。" +
+        "返回 id、name、type（族名）、ukey、来源文件（sourceFileId/isExternal）、description、values（数值）。" +
+        "通过浏览器 Cookie 全量下载 /data/{fileKey} 私有二进制，扫描样式索引表，" +
+        "族判别式取自 **MasterGo 客户端自身的枚举**（非猜测）：`05 <n>` 中 " +
+        "1=PAINT、2=EFFECT、3=TEXT、4=GRID、5=STROKE、6=CUSTOM；" +
+        "CUSTOM 再由子块 `01 <sub>` 细分：1=Spacing、2=Padding、3=Radius、4=CrossSpacing。" +
+        "值布局 `01 <sub> 02 <count> [<count> 个「紧凑浮点或 0」]`：" +
+        "SPACING 单值（如 `[8]`）、CORNER_RADIUS 四角（如 `[8,8,8,8]`）。" +
+        "实测（2026-09 antd5 副本 `204971164239455`）：SPACING **7/7**、CORNER_RADIUS **5/5** " +
+        "的 id/name/值 与浏览器 getLocalXxxStyles() 真值逐条一致。" +
+        "⚠️ **SPACING 与 NUMBER 是同一批对象**：二进制里完全同构（都是 CUSTOM+Spacing），" +
+        "变量 API（list_variables）叫 NUMBER、样式 API 叫 SPACING —— 客户端源码里两者映射到同一个 " +
+        "CppStyle，不是两个不同的东西。按变量视角取用请用 list_variables。" +
+        "⚠️ 已知局限：GRID / STROKE_WIDTH 的**值子块布局尚未取样**（现有全部样本中这两个族出现 0 次），" +
+        "故其 values 恒为 null（宁可判空也不猜）；PADDING 同样无正样本，但其布局与 SPACING 同族。" +
+        "参数 file 传文件 ID 或完整 URL。",
+      params: {
+        file: z.string().describe("MasterGo 文件 ID 或完整文件 URL（必填）"),
+        family: z
+          .string()
+          .optional()
+          .describe(
+            "可选：只返回某一族，取值 SPACING / PADDING / CORNER_RADIUS / STROKE_WIDTH / GRID（不传则全部）"
+          ),
+      },
+      run: async (client, args) => {
+        const { fileId } = normalize(String(args.file));
+        const meta = await client.getFileMeta(fileId);
+        const fileKey: string | undefined = meta.data?.fileKey;
+        if (!fileKey) throw new MasterGoError("无法获取 fileKey，请检查文件 ID 与访问权限");
+        let styles = await client.getTokenStyles(fileKey, fileId);
+        const want = args.family ? String(args.family).trim().toUpperCase() : null;
+        if (want) styles = styles.filter((s: any) => s.type === want);
+        return jsonOut({
+          source: "web-data-style-index",
+          fileId,
+          fileKey,
+          totalStyles: styles.length,
+          styles,
         });
       },
     },

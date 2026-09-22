@@ -16,6 +16,17 @@
 const MARKER_HEAD_PAGE = Buffer.from([0x03, 0x4e, 0x01]); // \x03N\x01
 const MARKER_PAGE = Buffer.from([0x07, 0x01, 0x08, 0x00, 0x09, 0x01, 0x00, 0x01]);
 const MODERN_HEAD = Buffer.from([0x09, 0x02, 0x01, 0x04, 0x02, 0x00, 0x03]);
+/**
+ * modern 头部签名的**后半段**：`01 04 02 00 03`，紧随其后 1 字节是 pageCount。
+ *
+ * ⚠️ 完整签名是 `09 <X> 01 04 02 00 03 <count>`，其中 **`<X>` 会变**：
+ * 实测同一份 antd5 官方稿，2026-09-21 下载为 `09 02`，2026-09-22 下载为 `09 04`，
+ * 而同一副本文件两次下载又是 `09 16`（`/data` 本就不可字节复现）。
+ * 早期实现把整串写死成 `09 02 …`，于是**新下载的文件全部解析出 0 个页面** ——
+ * 这是真实故障，不是测试问题。故此处只匹配后半段，`<X>` 视作可变、不作判据。
+ * 签名固定出现在文件**起始处（偏移 0）**，因此按偏移校验而非全文搜索，避免误命中。
+ */
+const MODERN_HEAD_TAIL = Buffer.from([0x01, 0x04, 0x02, 0x00, 0x03]);
 
 /** 读取以 \0 结尾的 utf8 字段；合法则返回 { value, next }，否则返回 null。 */
 function readCString(buf: Buffer, p: number): { value: string; next: number } | null {
@@ -33,9 +44,16 @@ function readCString(buf: Buffer, p: number): { value: string; next: number } | 
  * 直到凑齐 pageCount 个。任一步骤不合法则返回 null（由调用方回退 legacy 扫描）。
  */
 function parseModernHeadIndex(buf: Buffer): Array<{ id: string; name: string }> | null {
-  const idx = buf.indexOf(MODERN_HEAD);
-  if (idx === -1) return null;
-  let p = idx + MODERN_HEAD.length;
+  // 主判据：文件起始处的 `09 <X> 01 04 02 00 03 <count>`（X 可变，见 MODERN_HEAD_TAIL 注释）
+  let p: number;
+  if (buf.length > 8 && buf[0] === 0x09 && buf.subarray(2, 7).equals(MODERN_HEAD_TAIL)) {
+    p = 7; // count 位于偏移 7
+  } else {
+    // 兜底：兼容历史上 X=02 的旧签名（全文搜索，行为与早期实现一致）
+    const idx = buf.indexOf(MODERN_HEAD);
+    if (idx === -1) return null;
+    p = idx + MODERN_HEAD.length;
+  }
   if (p >= buf.length) return null;
   const count = buf[p];
   if (count === 0 || count > 300) return null; // 异常 count 直接放弃

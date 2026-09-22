@@ -82,6 +82,7 @@ node dist/index.cjs --cookie "gfsessionid=..." --url https://mastergo.com
 | `list_text_styles` | 文件内文字样式（TEXT）：id、名称、字体名、字号、行高、字体 hash | `/data/{fileKey}` 二进制样式索引表（`05 03` 子块） |
 | `list_effect_styles` | 文件内效果样式（EFFECT）：id、名称、颜色（含 alpha）、模糊半径、X/Y 偏移、类型、spread | `/data/{fileKey}` 二进制样式索引表 + 效果定义表 |
 | `list_variables` | 文件内变量（Design Tokens）：id、名称、type、collection、ukey、颜色 | `/data/{fileKey}` 二进制样式索引表（**实测与「样式」是同一批对象**） |
+| `list_token_styles` | 文件内**样式族**：SPACING / PADDING / CORNER_RADIUS / STROKE_WIDTH / GRID（即浏览器五个 `getLocalXxxStyles()`）：id、名称、族名、ukey、来源、**数值** | `/data/{fileKey}` 二进制样式索引表（`05 04/05/06`，族判别式取自客户端枚举） |
 | `list_components` | 文件本地组件（COMPONENT，含组件集）：id、名称、ukey、isExternal、宽高 | `/data/{fileKey}` 二进制节点扫描（本质是带自引用 ukey 的容器节点） |
 | `diff_files` | 两份文件/页面的节点树差异：新增/删除/修改，修改带字段级明细 | 基于 `get_page_tree` 输出做纯内存 diff |
 
@@ -132,7 +133,8 @@ node dist/index.cjs --cookie "gfsessionid=..." --url https://mastergo.com
 | --- | --- | --- |
 | `npm test` → `test:diff` | diff 纯函数自检 | 无（纯内存，任何时候可跑） |
 | `npm run test:regress` | legacy 节点树类型 + 样式基线 | 匿名下载 47MB 公开文件（或 `MG_REGRESS_SRC` 指快照） |
-| `npm run test:styles` | **modern** 颜色/文字/效果/变量对浏览器真值（含值级断言） | 公开样本 `antd_modern` **自动匿名下载 `/data` 并缓存**，CI 必跑；私有样本 `mobile_kit` 需 `.cache/mg_mobile_kit.bin`（**不入库**，缺失只跳过它一个） |
+| `npm run test:styles` | **modern** 颜色/文字/效果/变量/**样式族**对浏览器真值（含值级断言） | 公开样本 `antd_modern` **自动匿名下载 `/data` 并缓存**，CI 必跑；私有样本 `mobile_kit` 需 `.cache/mg_mobile_kit.bin`（**不入库**，缺失只跳过它一个） |
+| `npm run test:fresh` | **现下现解**冒烟：绕过一切快照重新下载，断言页数/节点数精确基线 | 匿名下载 ~101MB。**唯一能发现「服务端 `/data` 格式漂移」的检查**（见「注意事项」的 P0） |
 | `npm run test:e2e` | MCP stdio 全链路 | 先 `npm run build:bundle` |
 
 `npm run test:regress` → 逐 PAGE 根 `parsePageTree`，断言节点类型解码不退化。
@@ -164,7 +166,8 @@ legacy 与 modern 是**两套 ukey 编码 + 两类样式序号短码**，只测�
 - **GitHub Actions**（`.github/workflows/ci.yml`）：push/PR 触发，依次跑 `npm ci` → `tsc` → `test:diff` → `test:regress` → `test:styles` → `build:bundle` → `test:e2e`。
   两个需要 `/data` 的步骤共用 `actions/cache`（key `mg-bin-v2`，缓存 `~/.cache/mg`）复用二进制快照，**cache 步骤必须排在消费者之前**（此前排在 `test:regress` 之后，等于从未命中过 —— 已修）。
 - **`npm run test:diff`**（`scripts/verify-diff.ts`）：diff 纯函数自检，纯内存、不依赖网络/二进制。
-- **`npm run test:e2e`**（`scripts/e2e-mcp.ts`）：以真实 MCP 客户端身份 spawn `dist/index.cjs`，走 JSON-RPC stdio 全链路——initialize → `tools/list`（断言 10 个工具齐全）→ 依次调用 `get_file_meta` / `list_pages` / `get_page_tree` / `diff_files` / `get_file_nodes` / `list_styles`，基于 **Ant Design 5 官方公开文件**（antd5，modern 格式 74 页，无需 Cookie），首次全量下载 ~106MB、进程内缓存复用。本地实测全链路 PASS（list_pages 74 页、get_file_nodes 144055 节点）。
+- **`npm run test:e2e`**（`scripts/e2e-mcp.ts`）：以真实 MCP 客户端身份 spawn `dist/index.cjs`，走 JSON-RPC stdio 全链路——initialize → `tools/list`（断言 11 个工具齐全）→ 依次调用 `get_file_meta` / `list_pages` / `get_page_tree` / `diff_files` / `get_file_nodes` / `list_styles` / `list_token_styles`，基于 **Ant Design 5 官方公开文件**（antd5，modern 格式 74 页，无需 Cookie），首次全量下载 ~106MB、进程内缓存复用。本地实测全链路 PASS（list_pages 74 页、get_file_nodes 144055 节点）。
+  > ⚠️ 脚本启动前会校验 `dist/index.cjs` 是否比 `src/*.ts` 旧（dist/ 已 gitignore）：本地忘记 `build:bundle` 会拿旧产物跑出**看起来像解码坏了**的假失败，现在直接提示重建。
 
 ## 权限说明（重要）
 
@@ -238,6 +241,22 @@ dist/
     - **modern 布局（antd5 等，2026-09 破析）**：`03 <字体名>\0 04 <紧凑浮点 fontSize> [08 <紧凑浮点 letterSpacing>] 0c <PostScript 名>\0 12 <json 字体元数据>\0 13 <8B> …`。新增 `08`=**字间距**（**仅非 0 时出现**，0 则整字段缺省；单样本 `08 83 00 00 e0`=30 与浏览器真值一致，单位 PERCENT）。`08`/`12`/`13` 已纳入 `parseTextStyleBody`；modern 样式仅反解出 fontSize/字体/letterSpacing，lineHeight/hash 在该布局缺省。
     - ⚠️ 输出的 `fontName.family` 由 PostScript 名按最后一个 `-` 拆分，可能是**压缩形式**（二进制存 `OpenSans`，真值 API 返回 `Open Sans`）；需要精确字体名请用 `fontPostScriptName`。
   - 渐变样式（GRADIENT_LINEAR/RADIAL）已破解（2026-09）：渐变 paint 图元 `01 <selfId>\0 02 <refId>\0 03 61 <sub> 00 05 <kind> 08 …` 中 `<kind>` 判别类型（1=LINEAR、2=RADIAL），`08` 后是多色 stops + 手柄。紧凑数字约定 **0 值压成单字节 0x00、非 0 用 4 字节紧凑浮点**；stop 颜色按 **a,r,g,b** 顺序；stop0=`<color><position>`、其余= `01 <position> 02 <color>`；手柄 `0a 03 <h0> [04 <h1>]`（RADIAL 存两对、LINEAR 只存一对，第二个由轴默认推导未编码）。渐变 paint 的 refId 即所属样式 id，故按 refId 聚合到该样式。实测火车票 `渐变` 样式两笔渐变的 stops/handles 与浏览器真值**逐位一致**。
+- [x] **样式族（SPACING / PADDING / CORNER_RADIUS / STROKE_WIDTH / GRID）**：已交付 `list_token_styles`（2026-09-22）。
+  - **族判别式来自客户端自身的枚举，不是猜的**：在编辑器 bundle 里找到
+    `PAINT=1, EFFECT=2, TEXT=3, GRID=4, STROKE=5, CUSTOM=6`（即样式索引的 `05 <n>`），
+    以及 CUSTOM 子类型 `NONE=0, Spacing=1, Padding=2, Radius=3, CrossSpacing=4`（即子块 `01 <sub>`）。
+    客户端 `StyleToCppStyle` 明确写出 `PADDING={CUSTOM,Padding}`、`SPACING={CUSTOM,Spacing}`、
+    `NUMBER={CUSTOM,Spacing}`、`CORNER_RADIUS={CUSTOM,Radius}`、`STROKE_WIDTH={STROKE,NONE}`、`GRID={GRID,NONE}`。
+    该枚举与我们**既有实测**的 1/2/3/6 完全吻合，故可信。
+  - **实测对照**（antd5 副本，浏览器真值经 `window.mg` 导出）：SPACING **7/7**、CORNER_RADIUS **5/5**
+    的 id/name/值逐条一致（真值见 `test/fixtures/truth_numeric_families.json`，已进 `test:styles` 守卫）。
+  - **关键认知：SPACING 与 NUMBER 是同一批对象**。二进制里完全同构（都是 `CUSTOM+Spacing`），
+    客户端源码里两者映射到**同一个 CppStyle** —— 变量 API 叫 `NUMBER`、样式 API 叫 `SPACING`，
+    是同一批对象的两个视图（与「变量=样式」同源）。`list_variables` 按变量 API 输出 NUMBER（保持不变），
+    `list_token_styles` 按样式 API 输出 SPACING。
+  - ⚠️ **已知局限**：`GRID` / `STROKE_WIDTH` 在现有**全部 6 份样本里出现 0 次**，其**值子块布局未知**，
+    故只登记类型、`values` 恒为 null（宁可判空也不猜）；PADDING 同样无正样本，但布局与 SPACING 同族。
+  - **顺带修复**：此前 `05 04/05` 与 `05 06` 的未知 sub 会被**静默丢弃**，现在都会出现在结果里。
 - [x] **变量（Variables）**：已交付 `list_variables`，实测 **57/57** 条 id/name/type 与浏览器 `variables.getVariables()` 真值一致。数值型变量（`05 06` = CORNER_RADIUS/NUMBER）**已破解**，`floatData` 逐值命中 antd5 真值（详见 ⑤ 节）。
   - **重大认知纠正**：MasterGo 的**「变量」与「样式」是同一批对象**。浏览器真值交叉验证：`getLocalPaintStyles()` + `getLocalTextStyles()` + `getLocalEffectStyles()` 的 id 集合与 `variables.getVariables()` 的 id 集合**双向完全包含**（各 57 个），变量 `type` 分布恰为 `{PAINT: 38, EFFECT: 6, TEXT: 13}`。即样式 API 是「按 type 过滤的视图」、变量 API 是「统一视图」，二者共用同一张索引表 —— **破解变量 = 破解样式**。
   - **`M:1` / `M:2` 是真实 id**（纠正旧说法）：真值 `getCollections()` 返回 `[{id:"M:1", name:"集合", isExternal:false, modes:[{id:"M:2", name:"模式 1"}]}]`，并非客户端凭空构造的 pseudo-id；变量组 id 形如 `M:1_Neutrals`、`M:1_外部/Carbon Neutral`。
@@ -321,11 +340,19 @@ dist/
 ### 既成工具的可复用输出
 - `get_page_tree` 的 `geometry` 已含 `fills/strokes/strokeWeight/strokeAlign/constraints/autoLayout/rotation/transform/x/y/width/height/cornerRadius`。
 - **样式 / 变量类工具的统一模式**：`normalize(file) → getFileMeta → getLocalXxx(fileKey, fileId) → jsonOut`，在 `tools.ts` 里追加一个 `ToolDef` 即可。
-- 解码逻辑集中在 `node-tree.ts`：`scanStyleIndex` 是颜色 / 文字 / 效果 / 变量**四个工具的共同底座**（按 `05 <n>` 判类型 + 按 ukey 判本文件）；`buildPaintTable`（颜色）、`scanEffectTable`（效果）、`parseTextStyleBody`（文字）各自解析值。
+- 解码逻辑集中在 `node-tree.ts`：`scanStyleIndex` 是颜色 / 文字 / 效果 / 变量 / **样式族**五个工具的共同底座（按 `05 <n>` 判类型 + 按 ukey 判本文件）；`buildPaintTable`（颜色）、`scanEffectTable`（效果）、`parseTextStyleBody`（文字）、`parseNumericStyleBody`（数值族）各自解析值。
 - 新增能力时请同步更新：`tools.ts` 的「当前已实现」注释、README 工具表与 Roadmap、`NEXT.md`。
 
 ## 注意事项
 
+- **⚠️ `/data` 头部签名的版本字节会变（2026-09-22 踩坑）**：modern 格式头部是
+  `09 <X> 01 04 02 00 03 <pageCount>`，其中 **`<X>` 不是常量** —— 同一份 antd5 官方稿
+  09-21 下载为 `09 02`、09-22 下载为 `09 04`，同一副本文件两次下载又是 `09 16`。
+  早期 `page-index.ts` / `node-index.ts` 把整串写死成 `09 02 …`，于是**所有新下载的文件**都
+  判成 legacy：`list_pages` 返回 0 页、`get_file_nodes` 从 144055 条掉到 1 条。
+  现已改为只匹配后半段 `01 04 02 00 03`（签名固定在偏移 0，据此校验以免误命中），
+  并对 `09 02` 旧签名保留兜底。**教训：`/data` 既然「不可字节复现」，任何跨下载的固定字节
+  都不该当判据** —— 回归要按结构比对（本仓库既有约定）。
 - 私有二进制格式为最小逆向，若 MasterGo 调整 `/data/{fileKey}` 结构，页面索引解析需同步更新（见 `page-index.ts` 注释）；
 - Cookie 有有效期，失效后需重新登录浏览器复制（`.env` 中更新 `MG_COOKIE`）；
 - 项目仅供内部使用，请遵守 MasterGo 服务条款与团队数据安全规范。

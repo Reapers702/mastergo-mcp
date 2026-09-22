@@ -339,6 +339,23 @@ export class MasterGoClient {
   }
 
   /**
+   * 样式族列表（SPACING / PADDING / CORNER_RADIUS / STROKE_WIDTH / GRID）。
+   *
+   * 即浏览器 `getLocalSpacingStyles()` / `getLocalPaddingStyles()` /
+   * `getLocalCornerRadiusStyles()` / `getLocalStrokeWidthStyles()` / `getLocalGridStyles()`
+   * 五个接口的统一离线实现。
+   *
+   * 族判别式取自 MasterGo 客户端自身的枚举（`05 <n>`：1=PAINT/2=EFFECT/3=TEXT/4=GRID/5=STROKE/6=CUSTOM，
+   * CUSTOM 子块 `01 <sub>`：1=Spacing/2=Padding/3=Radius/4=CrossSpacing），
+   * 其中 SPACING 与 CORNER_RADIUS 已与浏览器真值逐条比对通过（7/7、5/5）。
+   */
+  async getTokenStyles(fileKey: string, fileId: string): Promise<any> {
+    const { listTokenStyles } = await import("./node-tree.js");
+    const buf = await this.fetchData(fileKey);
+    return listTokenStyles(buf, fileId);
+  }
+
+  /**
    * 文件本地组件（COMPONENT，含组件集 COMPONENT_SET）列表。
    *
    * 实测认知：MasterGo 的「组件」没有独立编码表，本质是「带自引用 ukey 的容器节点」——
