@@ -395,6 +395,34 @@ function hasAny1c(buf: Buffer, geomPos: number, end: number): boolean {
 }
 
 /**
+ * modern 叶子类型判别 —— 收集制（探针leaf，antd5 官方稿叶子 56833/56833 = 100.0%）。
+ *
+ * 叶子几何段内除真实类型块外常混有「前置附加块」（PEN 前多一个 RECTANGLE@偏移4/23、
+ * TEXT 前多一个 LINE@55-60）与「后置嵌入块」（TEXT 的 ELLIPSE@127-1729、LINE 的 TEXT@234），
+ * 单靠「首个命中即返回」会把 PEN 误判 RECTANGLE、TEXT 误判 LINE。
+ * 规则：
+ *   1. 偏移 >150 的标记是叶子节点内嵌的「嵌入块」（与容器块同一阈值），忽略；
+ *   2. 其余标记中 PEN/TEXT/ELLIPSE/SLICE 等复杂类取偏移最小者（前置附加块是
+ *      RECTANGLE/LINE 等非复杂类）；无复杂类时取最后一个标记。
+ */
+function decodeModernLeaf(buf: Buffer, geomPos: number, end: number): string | null {
+  let complex: { p: number; t: string } | null = null;
+  let last: string | null = null;
+  for (let p = geomPos; p + 1 < end; p++) {
+    if (buf[p] !== 0x1c) continue;
+    const t = TYPE_1C[buf[p + 1]];
+    if (!t) continue;
+    if (p - geomPos > 150) continue; // 后置嵌入块，忽略
+    last = t;
+    if (t === "PEN" || t === "TEXT" || t === "ELLIPSE" || t === "SLICE") {
+      if (!complex || p < complex.p) complex = { p, t };
+    }
+  }
+  if (complex) return complex.t;
+  return last;
+}
+
+/**
  * 新格式容器类型判别 —— pass0 强判据（探针34，antd5 官方稿容器准确率 100.0%）。
  *
  * 只采用实测零假阳性的特征，无法确定时返回 null，由 parsePageTree 的 modern 多阶段
@@ -420,12 +448,14 @@ function decodeNodeType(
   format: NodeFormat,
 ): string | null {
   if (format === "modern") {
-    // 段内存在容器块则按容器处理（与探针34 的 firstContainer 优先一致）；
+    // 段内存在容器块且偏移 <=150 才按容器处理（与探针34 的 firstContainer 优先一致）；
+    // 更远的容器块是叶子节点内嵌块（实测真叶子内偏移 197-575），忽略以免误判 FRAME/COMPONENT。
     // 容器块体判据（b3=00→GROUP、05==1→COMPONENT）之外的类型返回 null，
     // 由 parsePageTree 的 modern 多阶段流程（CS → 1a 链 → FRAME）补齐。
     const cp = findContainerBlock(buf, geomPos, end);
-    if (cp >= 0) return decodeModernContainer(buf, cp, end);
-    // 非容器（文本/矩形/椭圆等）继续沿用下方的叶子扫描
+    if (cp >= 0 && cp - geomPos <= 150) return decodeModernContainer(buf, cp, end);
+    // 非容器（文本/矩形/椭圆等）：叶子收集制（复杂类取偏移最小、否则取最后）
+    return decodeModernLeaf(buf, geomPos, end);
   }
 
   for (let p = geomPos; p + 1 < end; p++) {
@@ -1092,10 +1122,12 @@ export function parsePageTree(buf: Buffer, pageId: string): PageTree {
     for (const [id, r] of byId) {
       const end = geomEnd.get(id) ?? buf.length;
       typeOf.set(id, decodeNodeType(buf, r.geomPos, end, id, format));
-      const cp = findContainerBlock(buf, r.geomPos, end);
+      const cpRaw = findContainerBlock(buf, r.geomPos, end);
+      // 与 decodeNodeType 一致：容器块偏移 <=150 才算真容器；叶子内嵌容器块（>=197）忽略
+      const cp = cpRaw >= 0 && cpRaw - r.geomPos <= 150 ? cpRaw : -1;
       feat.set(id, {
-        b3: cp !== null ? buf[cp + 3] : -1,
-        ref: cp !== null ? findComponentRef(buf, r.geomPos, end) : null,
+        b3: cp >= 0 ? buf[cp + 3] : -1,
+        ref: cp >= 0 ? findComponentRef(buf, r.geomPos, end) : null,
         no1c: end > r.geomPos && !hasAny1c(buf, r.geomPos, end),
       });
     }
