@@ -380,34 +380,35 @@ function findComponentRef(buf: Buffer, geomPos: number, end: number): string | n
   return null;
 }
 
-/**
- * 新格式容器类型判别。
- *
- * 只采用实测精确的特征，无法确定时返回 null —— 宁可判空也不猜错
- * （旧实现把 modern 的 GROUP 误判为 BOOLEAN_OPERATION）：
- *   `1c 07 01 00`     → GROUP（覆盖 GROUP 真值 784/790，零假阳性）
- *   几何段含 selfUkey → COMPONENT
- *   `1a` 指向已知组件 → INSTANCE
- *   其余（含 FRAME）   → null
- *
- * 已知局限：COMPONENT_SET 并入 COMPONENT。实测只有 24.9%（48/193）的 COMPONENT_SET
- * 带 selfUkey，且在其上找不到高精确判别式（最优候选 `几何段第2字节==01 && 含 06 01`
- * 精确率仅 79%、会误标 7 个 COMPONENT、只多命中 27 个），故不引入该猜测。
- */
-function decodeModernContainer(
-  buf: Buffer,
-  p: number,
-  geomPos: number,
-  end: number,
-  selfId: string,
-  knownComponents: Set<string> | null,
-): string | null {
-  if (buf[p + 3] === 0x00) return "GROUP";
-  if (hasSelfUkey(buf, geomPos, end, selfId)) return "COMPONENT";
-  if (knownComponents) {
-    const ref = findComponentRef(buf, geomPos, end);
-    if (ref && knownComponents.has(ref)) return "INSTANCE";
+/** 容器块体（`1c 07 01 <b3>` 之后）内首个 `05 <n>` 字段的 n 值；块体无 05 时返回 null。 */
+function containerBody05(buf: Buffer, cp: number, end: number): number | null {
+  for (let p = cp + 4; p + 1 < end; p++) {
+    if (buf[p] === 0x05) return buf[p + 1];
   }
+  return null;
+}
+
+/** 几何段内是否存在任意 0x1c 字节（用于识别「无类型块的组件定义节点」）。 */
+function hasAny1c(buf: Buffer, geomPos: number, end: number): boolean {
+  for (let p = geomPos; p < end; p++) if (buf[p] === 0x1c) return true;
+  return false;
+}
+
+/**
+ * 新格式容器类型判别 —— pass0 强判据（探针34，antd5 官方稿容器准确率 100.0%）。
+ *
+ * 只采用实测零假阳性的特征，无法确定时返回 null，由 parsePageTree 的 modern 多阶段
+ * 流程（CS 树结构 → 1a 链跟随 → 剩余容器 FRAME）补齐：
+ *   `1c 07 01 00`      → GROUP（GROUP 真值 788/788，零假阳性）
+ *   容器块体首个 05==1 → COMPONENT（7406/7406，零假阳性）
+ *   其余（FRAME/INSTANCE/COMPONENT_SET）→ null
+ *
+ * 注：旧实现用「几何段含 selfUkey → COMPONENT」，实测会误判 48 个带 self 的
+ * COMPONENT_SET，modern 下已弃用；legacy 分支仍保留该判据（见 decodeNodeType）。
+ */
+function decodeModernContainer(buf: Buffer, p: number, end: number): string | null {
+  if (buf[p + 3] === 0x00) return "GROUP";
+  if (containerBody05(buf, p, end) === 1) return "COMPONENT";
   return null;
 }
 
@@ -417,23 +418,13 @@ function decodeNodeType(
   end: number,
   selfId: string,
   format: NodeFormat,
-  knownComponents: Set<string> | null,
 ): string | null {
   if (format === "modern") {
-    const p = findTypeBlock(buf, geomPos, end);
-    if (p >= 0) {
-      const b = buf[p + 1];
-      if (b === 0x07 && buf[p + 2] === 0x01) {
-        return decodeModernContainer(buf, p, geomPos, end, selfId, knownComponents);
-      }
-      // 首个 1c 既不是容器块也不是叶子标记时，叶子判别不可信：段内若存在容器块则按容器处理。
-      // 实测这类记录 1360 个，其中 1116 个真值为容器（精确率 82.1%）；而首个 1c 是叶子标记的
-      // 115237 个记录判别完全不变。
-      if (TYPE_1C[b] === undefined) {
-        const cp = findContainerBlock(buf, geomPos, end);
-        if (cp >= 0) return decodeModernContainer(buf, cp, geomPos, end, selfId, knownComponents);
-      }
-    }
+    // 段内存在容器块则按容器处理（与探针34 的 firstContainer 优先一致）；
+    // 容器块体判据（b3=00→GROUP、05==1→COMPONENT）之外的类型返回 null，
+    // 由 parsePageTree 的 modern 多阶段流程（CS → 1a 链 → FRAME）补齐。
+    const cp = findContainerBlock(buf, geomPos, end);
+    if (cp >= 0) return decodeModernContainer(buf, cp, end);
     // 非容器（文本/矩形/椭圆等）继续沿用下方的叶子扫描
   }
 
@@ -1089,22 +1080,94 @@ export function parsePageTree(buf: Buffer, pageId: string): PageTree {
     byPos.map((r) => ({ geomPos: r.geomPos, end: geomEnd.get(r.id) ?? buf.length })),
   );
 
-  // 第一遍解类型，并收集已识别的组件（供第二遍解析实例的母版引用）
+  // 解码节点类型：
+  //   legacy —— 单遍 decodeNodeType；
+  //   modern —— 多阶段（探针34 算法，antd5 官方稿容器准确率 100.0%）：
+  //     pass0 强判据（叶子/GROUP/COMPONENT）→ pass1 CS 树结构 → pass2 1a 链跟随 → pass3 剩余 FRAME
   const typeOf = new Map<string, string | null>();
-  const components = new Set<string>();
-  for (const [id, r] of byId) {
-    const end = geomEnd.get(id) ?? buf.length;
-    const t = decodeNodeType(buf, r.geomPos, end, id, format, null);
-    typeOf.set(id, t);
-    if (t === "COMPONENT" || t === "COMPONENT_SET") components.add(id);
-  }
-  // 第二遍：modern 下用 `1a <componentId>` 引用补齐 INSTANCE
-  if (format === "modern" && components.size > 0) {
+  if (format === "modern") {
+    // pass0：decodeNodeType 判叶子/GROUP/COMPONENT；同时预扫链跟随所需特征
+    // （b3=容器块第 4 字节、ref=首个 1a 引用、no1c=几何段内无任何 1c）。
+    const feat = new Map<string, { b3: number; ref: string | null; no1c: boolean }>();
     for (const [id, r] of byId) {
-      if (typeOf.get(id) != null) continue;
       const end = geomEnd.get(id) ?? buf.length;
-      const t = decodeNodeType(buf, r.geomPos, end, id, format, components);
-      if (t != null) typeOf.set(id, t);
+      typeOf.set(id, decodeNodeType(buf, r.geomPos, end, id, format));
+      const cp = findContainerBlock(buf, r.geomPos, end);
+      feat.set(id, {
+        b3: cp !== null ? buf[cp + 3] : -1,
+        ref: cp !== null ? findComponentRef(buf, r.geomPos, end) : null,
+        no1c: end > r.geomPos && !hasAny1c(buf, r.geomPos, end),
+      });
+    }
+    // 子节点图（CS 树结构判定）
+    const kids = new Map<string, string[]>();
+    for (const [id, r] of byId) {
+      const p = r.parent ?? "";
+      const arr = kids.get(p);
+      if (arr) arr.push(id);
+      else kids.set(p, [id]);
+    }
+    const isC = (id: string, t: string): boolean => typeOf.get(id) === t;
+    const isUndef = (id: string): boolean => !typeOf.has(id) || typeOf.get(id) === null;
+
+    // 页面根固定为 PAGE（其几何段含容器块会被多阶段误判 FRAME；真值即 PAGE）
+    typeOf.set(pageId, "PAGE");
+
+    // pass1：COMPONENT_SET —— 父为根/GROUP/CS 且直接子全为 COMPONENT 的未判容器（固定点迭代）
+    for (let round = 0; round < 100; round++) {
+      let changed = 0;
+      for (const [id, r] of byId) {
+        const f = feat.get(id)!;
+        if (!isUndef(id) || f.b3 !== 0x01 || f.ref !== null) continue;
+        const p = r.parent;
+        if (!(p === null || isC(p, "GROUP") || isC(p, "COMPONENT_SET"))) continue;
+        const ch = kids.get(id) ?? [];
+        if (ch.length === 0) continue;
+        if (ch.every((c) => isC(c, "COMPONENT"))) {
+          typeOf.set(id, "COMPONENT_SET");
+          changed++;
+        }
+      }
+      if (changed === 0) break;
+    }
+
+    // pass2：INSTANCE/FRAME —— 沿 1a 引用链跟随到链端判定：
+    //   链端 COMPONENT/CS → COMPONENT；FRAME/GROUP → FRAME；
+    //   链端无引用且几何段无 1c（库内组件定义）→ DEF；有 1c 未判容器 → FRAME_PRED；
+    //   COMPONENT/DEF → INSTANCE，FRAME/FRAME_PRED → FRAME（环/出图则留给 pass3）
+    const chainEnd = (id0: string): string => {
+      const seen = new Set<string>([id0]);
+      let cur = id0;
+      for (let i = 0; i < 40; i++) {
+        const f = feat.get(cur);
+        if (!f) return "NOBIN";
+        const t = typeOf.get(cur);
+        if (t === "COMPONENT" || t === "COMPONENT_SET") return "COMPONENT";
+        if (t === "FRAME" || t === "GROUP") return "FRAME";
+        if (f.ref === null) return f.no1c ? "DEF" : "FRAME_PRED";
+        if (seen.has(f.ref)) return "LOOP";
+        seen.add(f.ref);
+        cur = f.ref;
+      }
+      return "LOOP";
+    };
+    for (const id of byId.keys()) {
+      const f = feat.get(id)!;
+      if (!isUndef(id) || f.b3 !== 0x01 || f.ref === null) continue;
+      const e = chainEnd(id);
+      if (e === "COMPONENT" || e === "DEF") typeOf.set(id, "INSTANCE");
+      else if (e === "FRAME" || e === "FRAME_PRED") typeOf.set(id, "FRAME");
+    }
+
+    // pass3：剩余未判容器（b3==1）→ FRAME
+    for (const id of byId.keys()) {
+      const f = feat.get(id)!;
+      if (isUndef(id) && f.b3 === 0x01) typeOf.set(id, "FRAME");
+    }
+  } else {
+    for (const [id, r] of byId) {
+      const end = geomEnd.get(id) ?? buf.length;
+      typeOf.set(id, decodeNodeType(buf, r.geomPos, end, id, format));
     }
   }
 

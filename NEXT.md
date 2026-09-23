@@ -6,7 +6,8 @@
 
 **11 个工具**可用：`get_file_meta` / `list_pages` / `get_file_nodes` / `get_page_tree` / `list_styles` / `list_text_styles` / `list_effect_styles` / `list_variables` / `list_token_styles` / `list_components` / `diff_files`。
 
-- 节点树：legacy 828/828（0 错判）、modern 命中 8.3%（容器仍返回 `null`）
+- 节点树：legacy 828/828（0 错判）、modern 容器类型 **已打通（2026-09-23）** —— FRAME/INSTANCE/COMPONENT/GROUP 全对、
+  COMPONENT_SET 191/193、容器准确率 **100.0%**（antd5 官方稿，探针34 算法：`05==1` 组件判别式 + CS 树结构 + `1a` 链跟随）
 - **样式与变量：已全面打通**，与浏览器真值逐条一致 —— 颜色 38/38、文字 13/13、效果 **34/34（antd5，90/90 项含全字段）**、变量 57/57；
   数值型变量（CORNER_RADIUS/NUMBER）也已解出 `floatData`，antd5 **12/12 逐值一致**
 - **样式族：已打通（2026-09-22）**，`list_token_styles` 交付 —— SPACING **7/7**、CORNER_RADIUS **5/5** 与
@@ -260,7 +261,7 @@
 | **`textCase` / `decoration`** | `parseTextStyleBody` 的 `06`/`0b` | 需取样到非默认值。`createTextStyle` 会忽略这两个参数，只能**在编辑器 UI 里改**再建样式 —— 自动化控件命中不稳，是本项唯一阻塞 |
 | ~~**GRID / PADDING / SPACING / STROKE_WIDTH 等样式族**~~ | ✅ **已完成 2026-09-22**，见下 | — |
 | **多模式变量**（`modes` 不止 `M:2`） | `list_variables` | 需一个建了多模式的文件；现在只解首模式值 |
-| **modern 节点树容器类型**（FRAME/COMPONENT_SET 仍 `null`） | `decodeModernContainer` | 见 P3，两轮 n-gram 搜索无判别式，属硬骨头 |
+| ~~**modern 节点树容器类型**（FRAME/COMPONENT_SET 仍 `null`）~~ | ✅ **已完成 2026-09-23**，见 P3 | 探针34：`05==1`→COMPONENT + CS 树结构 + `1a` 链跟随，容器 100.0% |
 
 ---
 
@@ -356,9 +357,9 @@ legacy → `list_pages` **0 页**、`get_file_nodes` 从 144055 条掉到 **1 �
 
 | 项 | 现状 | 为何搁置 |
 | --- | --- | --- |
-| modern 的 FRAME / COMPONENT_SET | 返回 `null` | 段内无结构判别式（~1500 样本/类型、220B 窗口 n-gram 搜索无果）；宁可判空不猜错 |
-| COMPONENT_SET vs COMPONENT | 折叠为 COMPONENT | 最优候选判别式精确率仅 79%，会误标 7 个 COMPONENT |
-| 255 条「容器→LINE/RECTANGLE」 | 错判 | 让容器块压过叶子标记精确率仅 55% |
+| ~~modern 的 FRAME / COMPONENT_SET~~ | ~~返回 `null`~~ | **已解决（2026-09-23）**：容器块体首个 `05==1`→COMPONENT（7406/7406 零假阳性）；COMPONENT_SET 用树结构判据（父=根/GROUP/CS 且直接子全 COMPONENT，191/193）；INSTANCE 沿 `1a` 引用链跟随（链端 COMPONENT 或无 1c 组件定义→INSTANCE，38903/38903）；剩余容器→FRAME（26255/26255）。容器准确率 **100.0%** |
+| ~~COMPONENT_SET vs COMPONENT~~ | ~~折叠为 COMPONENT~~ | **已解决（2026-09-23）**：`05==1` 判 COMPONENT 后，CS 树结构判据补回 191 个 COMPONENT_SET（剩 2 个判 FRAME） |
+| ~~255 条「容器→LINE/RECTANGLE」~~ | ~~错判~~ | **随容器类型打通而消失（2026-09-23）**；仅剩非容器杂音：TEXT 12 个判 LINE、PEN 755 个判 RECTANGLE（叶子判别任务，非容器范围） |
 | 文字样式的 textCase / decoration | 未输出 | 现有全部样式两个字段**全是同一个值**（ORIGINAL / NONE），无法验证枚举语义（`06`/`0b` 恒为 `01`） |
 | 变量 scopes / codeSyntax / 多模式 | 未输出 | 二进制内未定位到 scopes 字段；本文件只有 1 个模式 M:2，多模式无从验证（数值型变量该模式的值已解出为 `floatData`） |
 | 样式 `isExternal` 的「本地/远程」语义 | 只表达「谁定义的」 | 订阅关系既不在 `/data` 也取不到匿名接口（见 12）|
